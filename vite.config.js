@@ -1,7 +1,8 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
-// https://vite.dev/config/
+// Basis-Pfad für GitHub Pages: https://fireheadffm.github.io/BoozeYard/
 export default defineConfig({
+  base: '/BoozeYard/',
   plugins: [react()],
 })
