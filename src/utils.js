@@ -147,3 +147,12 @@ export function resizeImage(file, maxSide, quality) {
     img.src = url
   })
 }
+
+export function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader()
+    r.onload = () => resolve(String(r.result).split(',')[1])
+    r.onerror = () => reject(new Error('Bild konnte nicht gelesen werden'))
+    r.readAsDataURL(blob)
+  })
+}

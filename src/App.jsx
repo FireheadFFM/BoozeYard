@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo, useRef } from 'react'
 import { supabase } from './supabase'
 import {
   SIZES, STATUS, BUCKET, lsGet, lsSet, abvLabel,
-  digitsOnly, codeVariants, codeWarning, lookupBarcode, resizeImage,
+  digitsOnly, codeVariants, codeWarning, lookupBarcode, resizeImage, blobToBase64,
 } from './utils'
 import './App.css'
 
@@ -733,6 +733,8 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const [analyzing, setAnalyzing] = useState(false)
+  const fRef = useRef(null)
 
   // Bilder: pro Platz entweder vorhandener Pfad, neue Datei oder entfernt
   const [imgs, setImgs] = useState(() => ({
@@ -752,6 +754,7 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
     })
   }, [bottle])
 
+  fRef.current = f
   const set = (k, v) => setF(prev => ({ ...prev, [k]: v }))
   const main = mains.find(c => c.id === f.mainId)
   const subs = cats.filter(c => c.parent_id === f.mainId)
@@ -821,6 +824,85 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
       if (error) throw error
     }
     if (toDelete.length > 0) await supabase.storage.from(BUCKET).remove(toDelete)
+  }
+
+  // Foto-Auswertung mit Claude (über die Supabase-Funktion analyze-label)
+  function applyAi(r) {
+    if (!r) throw new Error('Keine Antwort erhalten')
+    const cur = fRef.current
+    const next = { ...cur }
+    const filled = []
+    const same = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase()
+
+    if (r.brand) { next.brand = r.brand; filled.push('Marke') }
+    if (r.name) { next.name = r.name; filled.push('Name') }
+
+    const m = r.main_category ? mains.find(c => same(c.name, r.main_category)) : null
+    if (m) {
+      next.mainId = m.id
+      const s = r.sub_category ? cats.find(c => c.parent_id === m.id && same(c.name, r.sub_category)) : null
+      next.subId = s ? s.id : ''
+      filled.push(s ? 'Kategorie und Subkategorie' : 'Kategorie')
+    }
+
+    if (r.abv !== null && r.abv !== undefined) { next.abv = String(r.abv); filled.push('Alkoholgehalt') }
+    if (r.size_ml) {
+      if (SIZES.includes(r.size_ml)) { next.size = String(r.size_ml); next.customSize = '' }
+      else { next.size = 'other'; next.customSize = String(r.size_ml) }
+      filled.push('Größe')
+    }
+    if (r.vintage) { next.vintage = r.vintage; filled.push('Jahrgang') }
+
+    if (r.country) {
+      const known = lookups.find(l => l.kind === 'country' && same(l.name, r.country))
+      if (known) { next.country = known.name; next.newCountry = '' }
+      else { next.country = '__new'; next.newCountry = r.country }
+      filled.push('Herkunftsland')
+    }
+    if (r.region) {
+      const country = next.country === '__new' ? next.newCountry : next.country
+      const known = lookups.find(l => l.kind === 'region' && same(l.name, r.region) && (!l.country || !country || l.country === country))
+      if (known) { next.region = known.name; next.newRegion = '' }
+      else { next.region = '__new'; next.newRegion = r.region }
+      filled.push('Region / Stil')
+    }
+    if (r.notes && !next.notes) { next.notes = r.notes; filled.push('Notiz') }
+
+    setF(next)
+    setMsg(filled.length > 0
+      ? `Aus dem Foto übernommen: ${filled.join(', ')}. Bitte alles prüfen.`
+      : 'Auf dem Foto konnte nichts sicher erkannt werden.')
+  }
+
+  async function analyze() {
+    setError('')
+    setMsg('')
+    const files = SLOTS.map(([slot]) => imgs[slot].file).filter(Boolean)
+    if (files.length === 0) return setError('Bitte zuerst mindestens ein Foto auswählen.')
+    setAnalyzing(true)
+    try {
+      const images = []
+      for (const file of files) {
+        const blob = await resizeImage(file, 1200, 0.8)
+        images.push({ media_type: 'image/jpeg', data: await blobToBase64(blob) })
+      }
+      const taxonomy = {
+        categories: Object.fromEntries(mains.map(c => [c.name, cats.filter(x => x.parent_id === c.id).map(x => x.name)])),
+        countries: lookups.filter(l => l.kind === 'country').map(l => l.name),
+        regions: [...new Set(lookups.filter(l => l.kind === 'region').map(l => l.name))],
+      }
+      const { data, error: fnError } = await supabase.functions.invoke('analyze-label', { body: { images, taxonomy } })
+      if (fnError) {
+        let detail = fnError.message
+        try { const j = await fnError.context.json(); if (j?.error) detail = j.error } catch { /* ignorieren */ }
+        throw new Error(detail)
+      }
+      if (data?.error) throw new Error(data.error)
+      applyAi(data?.result)
+    } catch (e) {
+      setError('Auswertung fehlgeschlagen: ' + e.message)
+    }
+    setAnalyzing(false)
   }
 
   function validate() {
@@ -1032,6 +1114,11 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
           <ImageSlot key={slot} label={label} url={slotUrl(slot)} onPick={file => pickImage(slot, file)} onRemove={() => removeImage(slot)} />
         ))}
       </div>
+
+      <button type="button" className="ai-btn" onClick={analyze} disabled={analyzing}>
+        {analyzing ? 'Wertet aus…' : 'Foto auswerten (KI)'}
+      </button>
+      <p className="hint">Liest Marke, Name, Kategorie, Alkoholgehalt, Größe und Herkunft von den gewählten Fotos ab und füllt die Felder vor. Bereits eingetragene Produktdaten werden dabei ersetzt.</p>
 
       <input placeholder="Barcode (optional)" inputMode="numeric" value={f.barcode} onChange={e => set('barcode', e.target.value)} />
       <input placeholder="Mindestbestand (optional)" type="number" min="0" value={f.min_stock} onChange={e => set('min_stock', e.target.value)} />
