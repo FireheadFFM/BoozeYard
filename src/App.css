@@ -86,3 +86,33 @@ input::placeholder { color: #7a5f3a; }
 .scan-btn:hover { background: #e09d20; }
 .scan-btn.secondary { background: transparent; border: 1px solid #c8891a; color: #f0c96a; margin-top: 12px; }
 video { width: 100%; border-radius: 8px; margin-top: 14px; border: 1px solid #3a2810; }
+
+/* ---------- Update 1 ---------- */
+.card-icon.has-thumb { width: 56px; height: 56px; overflow: hidden; padding: 0; }
+.thumb { width: 100%; height: 100%; object-fit: cover; display: block; }
+.actions { flex-wrap: wrap; }
+.actions button.ghost { border-color: #4a3018; color: #c8a96a; }
+.actions button.ghost:hover { background: #3a2810; color: #f0c96a; }
+
+.edit-head { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; }
+.edit-head h2 { font-family: 'Cinzel', serif; font-size: 16px; font-weight: 400; color: #f0c96a; letter-spacing: 0.06em; }
+.link-back { background: none; border: none; color: #c8a96a; font-family: inherit; font-size: 12px; letter-spacing: 0.06em; cursor: pointer; text-transform: uppercase; padding: 6px 0; }
+.link-back:hover { color: #f0c96a; }
+
+.img-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.img-slot { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.img-box { width: 100%; aspect-ratio: 3 / 4; border: 1px dashed #4a3018; border-radius: 8px; background: #1a0f05; display: flex; align-items: center; justify-content: center; color: #8a7050; font-size: 12px; letter-spacing: 0.06em; cursor: pointer; overflow: hidden; }
+.img-box img { width: 100%; height: 100%; object-fit: cover; }
+.img-label { font-size: 10px; color: #b09060; letter-spacing: 0.06em; text-transform: uppercase; text-align: center; }
+.link-danger { background: none; border: none; color: #f0a090; font-family: inherit; font-size: 11px; cursor: pointer; text-decoration: underline; }
+
+.danger-btn { padding: 13px; background: transparent; color: #f0a090; border: 1px solid #7a3020; border-radius: 8px; font-family: inherit; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; cursor: pointer; width: 100%; }
+.danger-btn:hover { background: #7a3020; color: #fff; }
+.confirm-box { background: #2a1210; border: 1px solid #7a3020; border-radius: 8px; padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+.confirm-box p { font-size: 13px; color: #f0a090; line-height: 1.4; }
+.confirm-box .scan-btn { margin-top: 0; width: 100%; padding: 12px 8px; }
+
+.scan-tools { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 12px; }
+.scan-tools button { padding: 8px 14px; border-radius: 8px; border: 1px solid #c8891a; background: transparent; color: #f0c96a; font-family: inherit; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; cursor: pointer; }
+.scan-tools button:hover { background: #c8891a; color: #0f0a06; }
+.scan-btn:disabled, .inline-add button:disabled { opacity: 0.6; cursor: default; }

@@ -1,54 +1,10 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { supabase } from './supabase'
+import {
+  SIZES, STATUS, BUCKET, lsGet, lsSet, abvLabel,
+  digitsOnly, codeVariants, codeWarning, lookupBarcode, resizeImage,
+} from './utils'
 import './App.css'
-
-/* ---------- Hilfsfunktionen ---------- */
-
-const SIZES = [20, 30, 50, 100, 200, 350, 500, 700, 750, 1000, 1500, 1750]
-const STATUS = { closed: 'Geschlossen', open: 'Offen', empty: 'Leer' }
-
-function lsGet(key) {
-  try { return localStorage.getItem(key) } catch { return null }
-}
-function lsSet(key, value) {
-  try { localStorage.setItem(key, value) } catch { /* ignorieren */ }
-}
-
-function abvLabel(abv) {
-  if (abv === null || abv === undefined || abv === '') return null
-  const a = Number(abv)
-  if (a <= 0.5) return 'Alkoholfrei'
-  if (a < 46) return 'Standard'
-  if (a < 56.5) return 'High Proof'
-  if (a <= 57.5) return 'Navy Strength'
-  if (a < 75) return 'Overproof'
-  if (a < 76) return '151'
-  return 'Ultra High Proof'
-}
-
-function parseSize(q) {
-  if (!q) return null
-  const m = q.toLowerCase().replace(',', '.').match(/([\d.]+)\s*(ml|cl|l)\b/)
-  if (!m) return null
-  const v = parseFloat(m[1])
-  return Math.round(m[2] === 'ml' ? v : m[2] === 'cl' ? v * 10 : v * 1000)
-}
-
-async function lookupBarcode(code) {
-  try {
-    const r = await fetch(`https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(code)}.json?fields=product_name,brands,quantity`)
-    const j = await r.json()
-    if (j.status !== 1 || !j.product) return {}
-    const p = j.product
-    return {
-      brand: (p.brands || '').split(',')[0].trim(),
-      name: p.product_name || '',
-      size_ml: parseSize(p.quantity),
-    }
-  } catch {
-    return {}
-  }
-}
 
 /* ---------- Logos ---------- */
 
@@ -111,7 +67,7 @@ export default function App() {
   if (!session) {
     return <Shell><main><Login /></main></Shell>
   }
-  return <Main onLogout={() => supabase.auth.signOut()} />
+  return <Main userId={session.user.id} onLogout={() => supabase.auth.signOut()} />
 }
 
 function Login() {
@@ -141,7 +97,7 @@ function Login() {
 
 /* ---------- Hauptansicht ---------- */
 
-function Main({ onLogout }) {
+function Main({ userId, onLogout }) {
   const [tab, setTab] = useState('bottles')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -149,70 +105,119 @@ function Main({ onLogout }) {
   const [rooms, setRooms] = useState([])
   const [locations, setLocations] = useState([])
   const [cats, setCats] = useState([])
+  const [lookups, setLookups] = useState([])
+  const [thumbs, setThumbs] = useState({})
   const [prefill, setPrefill] = useState({ key: 0, data: null })
+  const [editId, setEditId] = useState(null)
+
+  async function loadThumbs(rows) {
+    const paths = rows.map(b => b.image_thumb).filter(Boolean)
+    if (paths.length === 0) { setThumbs({}); return }
+    const { data } = await supabase.storage.from(BUCKET).createSignedUrls(paths, 3600)
+    const map = {}
+    ;(data || []).forEach(x => { if (x.signedUrl) map[x.path] = x.signedUrl })
+    setThumbs(map)
+  }
 
   async function loadAll() {
-    const [b, r, l, c] = await Promise.all([
+    const [b, r, l, c, lv] = await Promise.all([
       supabase.from('bottles').select('*').order('brand').order('name'),
       supabase.from('rooms').select('*').order('sort_order').order('name'),
       supabase.from('locations').select('*').order('name'),
       supabase.from('categories').select('*').order('sort_order'),
+      supabase.from('lookup_values').select('*').order('name'),
     ])
     const err = b.error || r.error || l.error || c.error
     if (err) {
       setError('Daten konnten nicht geladen werden: ' + err.message)
     } else {
-      setError('')
+      setError(lv.error ? 'Hinweis: Picklisten fehlen noch (Datenbank-Update 03 ausführen).' : '')
       setBottles(b.data)
       setRooms(r.data)
       setLocations(l.data)
       setCats(c.data)
+      setLookups(lv.data || [])
+      loadThumbs(b.data)
     }
     setLoading(false)
   }
 
   useEffect(() => { loadAll() }, [])
 
-  function onScanned(data) {
+  // Barcode erkannt: erst im eigenen Bestand suchen, dann in Open Food Facts
+  async function handleCode(raw) {
+    const code = digitsOnly(raw)
+    if (!code) return
+    const variants = codeVariants(code)
+    const warn = codeWarning(code)
+    const own = bottles.filter(b => b.barcode && variants.includes(digitsOnly(b.barcode)))
+    let data
+    if (own.length > 0) {
+      const b = own[0]
+      const total = own.filter(x => x.status !== 'empty').reduce((s, x) => s + x.quantity, 0)
+      data = {
+        barcode: code, brand: b.brand, name: b.name, category_id: b.category_id, abv: b.abv,
+        size_ml: b.size_ml, country: b.country, region: b.region, vintage: b.vintage,
+        is_collection: b.is_collection, min_stock: b.min_stock,
+        note: `Schon im Bestand (${total}×) – Daten übernommen. Bitte Anzahl und Ort prüfen.`,
+      }
+    } else {
+      const mains = cats.filter(c => !c.parent_id)
+      const found = await lookupBarcode(variants, mains)
+      if (found && found.got.length > 0) {
+        data = { barcode: code, ...found, note: `Aus Open Food Facts übernommen: ${found.got.join(', ')}. Bitte prüfen und ergänzen.` }
+      } else {
+        data = { barcode: code, note: 'Barcode übernommen – keine Produktdaten gefunden. Bitte von Hand ausfüllen.' }
+      }
+    }
+    if (warn) data.note = `${data.note} ${warn}`
     setPrefill(p => ({ key: p.key + 1, data }))
+    setEditId(null)
     setTab('add')
   }
 
   const tabs = [
-    ['bottles', 'Flaschen'],
+    ['bottles', 'Bestand'],
     ['rooms', 'Lagerorte'],
     ['scanner', 'Scanner'],
     ['add', '+ Neu'],
   ]
+  const editing = editId ? bottles.find(b => b.id === editId) : null
 
   return (
     <Shell onLogout={onLogout}>
       <nav>
         {tabs.map(([id, label]) => (
-          <button key={id} onClick={() => setTab(id)} className={tab === id ? 'active' : ''}>{label}</button>
+          <button key={id} onClick={() => { setTab(id); setEditId(null) }} className={tab === id ? 'active' : ''}>{label}</button>
         ))}
       </nav>
       <main>
         {error && <div className="msg error">{error}</div>}
         {loading && <div className="empty">Lädt…</div>}
-        {!loading && tab === 'bottles' && (
-          <BottleList bottles={bottles} cats={cats} rooms={rooms} locations={locations} reload={loadAll} />
+        {!loading && tab === 'bottles' && !editing && (
+          <BottleList bottles={bottles} cats={cats} rooms={rooms} locations={locations} thumbs={thumbs}
+            reload={loadAll} onEdit={id => setEditId(id)} />
+        )}
+        {!loading && tab === 'bottles' && editing && (
+          <BottleForm key={editing.id} userId={userId} bottle={editing} cats={cats} rooms={rooms}
+            locations={locations} lookups={lookups} reload={loadAll} onDone={() => setEditId(null)} />
         )}
         {!loading && tab === 'rooms' && (
           <Rooms bottles={bottles} rooms={rooms} locations={locations} reload={loadAll} />
         )}
-        {tab === 'scanner' && <Scanner onDetected={onScanned} />}
+        {tab === 'scanner' && <Scanner onCode={handleCode} />}
         {!loading && tab === 'add' && (
-          <AddForm key={prefill.key} prefill={prefill.data} cats={cats} rooms={rooms} locations={locations} reload={loadAll} />
+          <BottleForm key={prefill.key} userId={userId} prefill={prefill.data} cats={cats} rooms={rooms}
+            locations={locations} lookups={lookups} reload={loadAll} />
         )}
       </main>
     </Shell>
   )
 }
 
-/* ---------- Flaschenliste mit Suche und Filtern ---------- */
+/* ---------- Bestandsliste mit Suche und Filtern ---------- */
 
-function BottleList({ bottles, cats, rooms, locations, reload }) {
+function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit }) {
   const [q, setQ] = useState('')
   const [catId, setCatId] = useState('')
   const [status, setStatus] = useState('')
@@ -253,7 +258,7 @@ function BottleList({ bottles, cats, rooms, locations, reload }) {
   const total = filtered.reduce((s, b) => s + (b.status === 'empty' ? 0 : b.quantity), 0)
   const roomLocs = locations.filter(l => l.room_id === roomId)
 
-  async function fail(error) {
+  function fail(error) {
     setMsg('Fehler: ' + error.message)
   }
 
@@ -262,7 +267,7 @@ function BottleList({ bottles, cats, rooms, locations, reload }) {
     if (b.quantity > 1) {
       const { error: e1 } = await supabase.from('bottles').update({ quantity: b.quantity - 1 }).eq('id', b.id)
       if (e1) return fail(e1)
-      const { id, created_at, updated_at, user_id, captured_at, ...copy } = b
+      const { id, created_at, updated_at, user_id, captured_at, image_front, image_back, image_side, image_thumb, ...copy } = b
       const { error: e2 } = await supabase.from('bottles').insert({ ...copy, status: 'open', quantity: 1, fill_percent: 100 })
       if (e2) return fail(e2)
     } else {
@@ -273,11 +278,43 @@ function BottleList({ bottles, cats, rooms, locations, reload }) {
     reload()
   }
 
+  // Öffnen rückgängig: zurück in den Stapel, falls es dort noch gleiche geschlossene Flaschen gibt
+  async function undoOpen(b) {
+    setMsg('')
+    const same = x => x.id !== b.id && x.status === 'closed' && x.brand === b.brand && x.name === b.name &&
+      x.size_ml === b.size_ml && x.category_id === b.category_id && x.room_id === b.room_id &&
+      x.location_id === b.location_id && (x.vintage || '') === (b.vintage || '') &&
+      (x.abv ?? null) === (b.abv ?? null)
+    const sib = b.quantity === 1 ? bottles.find(same) : null
+    let targetId = b.id
+    if (sib) {
+      const { error: e1 } = await supabase.from('bottles').update({ quantity: sib.quantity + 1 }).eq('id', sib.id)
+      if (e1) return fail(e1)
+      const { error: e2 } = await supabase.from('bottles').delete().eq('id', b.id)
+      if (e2) return fail(e2)
+      targetId = sib.id
+    } else {
+      const { error } = await supabase.from('bottles').update({ status: 'closed', fill_percent: 100 }).eq('id', b.id)
+      if (error) return fail(error)
+    }
+    await supabase.from('movements').insert({ bottle_id: targetId, type: 'adjustment', quantity: 1, notes: 'Öffnen rückgängig' })
+    reload()
+  }
+
   async function markEmpty(b) {
     setMsg('')
     const { error } = await supabase.from('bottles').update({ status: 'empty', fill_percent: 0 }).eq('id', b.id)
     if (error) return fail(error)
     await supabase.from('movements').insert({ bottle_id: b.id, type: 'empty', quantity: -1 })
+    reload()
+  }
+
+  // Leer rückgängig: Flasche war fast leer, daher zurück auf "offen" mit 10 %
+  async function undoEmpty(b) {
+    setMsg('')
+    const { error } = await supabase.from('bottles').update({ status: 'open', fill_percent: 10 }).eq('id', b.id)
+    if (error) return fail(error)
+    await supabase.from('movements').insert({ bottle_id: b.id, type: 'adjustment', quantity: 1, notes: 'Leer rückgängig' })
     reload()
   }
 
@@ -325,9 +362,12 @@ function BottleList({ bottles, cats, rooms, locations, reload }) {
         const main = mainOf(b)
         const label = abvLabel(b.abv)
         const place = [roomById[b.room_id]?.name, locById[b.location_id]?.name].filter(Boolean).join(' › ')
+        const thumb = b.image_thumb ? thumbs[b.image_thumb] : null
         return (
           <div key={b.id} className={'card' + (b.status === 'empty' ? ' dim' : '')}>
-            <div className="card-icon"><BottleIcon /></div>
+            <div className={'card-icon' + (thumb ? ' has-thumb' : '')}>
+              {thumb ? <img className="thumb" src={thumb} alt="" loading="lazy" /> : <BottleIcon />}
+            </div>
             <div className="card-info">
               <h3>{b.brand} {b.name}{b.vintage ? ` (${b.vintage})` : ''}</h3>
               <p>
@@ -338,7 +378,7 @@ function BottleList({ bottles, cats, rooms, locations, reload }) {
                 <div className="fill-row">
                   <div className="fill-bar"><div className="fill-bar-inner" style={{ width: `${b.fill_percent}%` }} /></div>
                   <select className="fill-select" value={b.fill_percent} onChange={e => setFill(b, e.target.value)}>
-                    {[100, 90, 75, 50, 25, 10].map(v => <option key={v} value={v}>{v} %</option>)}
+                    {[...new Set([100, 90, 75, 50, 25, 10, b.fill_percent])].sort((x, y) => y - x).map(v => <option key={v} value={v}>{v} %</option>)}
                   </select>
                 </div>
               )}
@@ -354,6 +394,9 @@ function BottleList({ bottles, cats, rooms, locations, reload }) {
               <div className="actions">
                 {b.status === 'closed' && <button onClick={() => openOne(b)}>Öffnen</button>}
                 {b.status === 'open' && <button onClick={() => markEmpty(b)}>Leer</button>}
+                {b.status === 'open' && <button className="ghost" onClick={() => undoOpen(b)}>Rückgängig</button>}
+                {b.status === 'empty' && <button className="ghost" onClick={() => undoEmpty(b)}>Rückgängig</button>}
+                <button className="ghost" onClick={() => onEdit(b.id)}>Bearbeiten</button>
               </div>
             </div>
           </div>
@@ -431,15 +474,34 @@ function Rooms({ bottles, rooms, locations, reload }) {
 
 /* ---------- Scanner ---------- */
 
-function Scanner({ onDetected }) {
+const FORMATS = ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128']
+
+async function createDetector(preferWasm) {
+  if (!preferWasm && 'BarcodeDetector' in window) {
+    try {
+      const sup = await window.BarcodeDetector.getSupportedFormats()
+      const formats = FORMATS.filter(f => sup.includes(f))
+      if (formats.length > 0) return { detector: new window.BarcodeDetector({ formats }), wasm: false }
+    } catch { /* weiter mit Ersatz */ }
+  }
+  const { BarcodeDetector } = await import('barcode-detector/ponyfill')
+  return { detector: new BarcodeDetector({ formats: FORMATS }), wasm: true }
+}
+
+function Scanner({ onCode }) {
   const videoRef = useRef(null)
   const streamRef = useRef(null)
+  const trackRef = useRef(null)
   const activeRef = useRef(false)
   const [scanning, setScanning] = useState(false)
   const [manual, setManual] = useState('')
   const [info, setInfo] = useState('')
-
-  const supported = typeof window !== 'undefined' && 'BarcodeDetector' in window
+  const [torchOk, setTorchOk] = useState(false)
+  const [torchOn, setTorchOn] = useState(false)
+  const [devices, setDevices] = useState([])
+  const [devIdx, setDevIdx] = useState(0)
+  const [compat, setCompat] = useState(false)
+  const [busy, setBusy] = useState(false)
 
   function stop() {
     activeRef.current = false
@@ -447,72 +509,142 @@ function Scanner({ onDetected }) {
       streamRef.current.getTracks().forEach(t => t.stop())
       streamRef.current = null
     }
+    trackRef.current = null
     setScanning(false)
+    setTorchOn(false)
   }
 
-  useEffect(() => stop, [])
+  useEffect(() => () => stop(), [])
 
-  async function handleCode(code) {
+  async function handle(code) {
+    setBusy(true)
     setInfo(`Code ${code} erkannt – suche Produktdaten…`)
-    const data = await lookupBarcode(code)
-    onDetected({ barcode: code, ...data })
+    await onCode(code)
+    setBusy(false)
   }
 
-  async function start() {
+  async function start(deviceId, forceWasm) {
     setInfo('')
+    stop()
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
+      const video = {
+        width: { ideal: 1920 },
+        height: { ideal: 1080 },
+        ...(deviceId ? { deviceId: { exact: deviceId } } : { facingMode: { ideal: 'environment' } }),
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({ video })
       streamRef.current = stream
       activeRef.current = true
+      const track = stream.getVideoTracks()[0]
+      trackRef.current = track
+
+      let caps = {}
+      try { caps = track.getCapabilities ? track.getCapabilities() : {} } catch { /* ignorieren */ }
+      if (caps.focusMode && caps.focusMode.includes('continuous')) {
+        try { await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }) } catch { /* ignorieren */ }
+      }
+      setTorchOk(!!caps.torch)
+
+      try {
+        const all = await navigator.mediaDevices.enumerateDevices()
+        setDevices(all.filter(d => d.kind === 'videoinput'))
+      } catch { /* ignorieren */ }
+
       setScanning(true)
-      await new Promise(r => setTimeout(r, 50))
-      const video = videoRef.current
-      video.srcObject = stream
-      await video.play()
-      const detector = new window.BarcodeDetector({ formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128'] })
+      const v = videoRef.current
+      v.srcObject = stream
+      await v.play()
+
+      let { detector, wasm } = await createDetector(forceWasm ?? compat)
+      if (wasm) setInfo('Kompatibler Scanner aktiv (lädt beim ersten Mal etwas länger).')
+      let errors = 0
+
       const tick = async () => {
         if (!activeRef.current) return
         try {
-          const found = await detector.detect(video)
+          const found = await detector.detect(v)
+          errors = 0
           if (found.length > 0) {
             const code = found[0].rawValue
             stop()
-            handleCode(code)
+            handle(code)
             return
           }
-        } catch { /* weiter versuchen */ }
-        requestAnimationFrame(tick)
+        } catch {
+          errors += 1
+          if (errors >= 3 && !wasm) {
+            try {
+              const next = await createDetector(true)
+              detector = next.detector
+              wasm = true
+              setInfo('Der Standard-Scanner funktioniert auf diesem Gerät nicht – kompatibler Scanner aktiv.')
+            } catch { /* weiter versuchen */ }
+          }
+        }
+        setTimeout(tick, wasm ? 200 : 120)
       }
-      requestAnimationFrame(tick)
+      tick()
     } catch {
       stop()
       setInfo('Kamera konnte nicht gestartet werden. Bitte Zugriff erlauben oder den Code unten eintippen.')
     }
   }
 
+  async function tapFocus() {
+    const t = trackRef.current
+    if (!t) return
+    try {
+      await t.applyConstraints({ advanced: [{ focusMode: 'single-shot' }] })
+      setTimeout(() => { t.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(() => {}) }, 1500)
+    } catch { /* nicht unterstützt */ }
+  }
+
+  async function toggleTorch() {
+    const t = trackRef.current
+    if (!t) return
+    try {
+      await t.applyConstraints({ advanced: [{ torch: !torchOn }] })
+      setTorchOn(!torchOn)
+    } catch { setInfo('Die Taschenlampe lässt sich auf diesem Gerät nicht schalten.') }
+  }
+
+  function nextCamera() {
+    if (devices.length < 2) return
+    const idx = (devIdx + 1) % devices.length
+    setDevIdx(idx)
+    start(devices[idx].deviceId)
+  }
+
+  function toggleCompat() {
+    const next = !compat
+    setCompat(next)
+    if (scanning) start(devices[devIdx]?.deviceId, next)
+  }
+
   return (
     <div className="scanner-box">
       <h3>Barcode Scanner</h3>
-      <p>Kamera auf den Barcode der Flasche richten</p>
-      {supported
-        ? (!scanning && <button className="scan-btn" onClick={start}>Kamera starten</button>)
-        : <p className="muted">Dieser Browser kann keine Barcodes lesen. Bitte Chrome auf Android nutzen oder den Code eintippen.</p>}
+      <p>Kamera auf den Barcode der Flasche richten, etwa 20–30 cm Abstand. Zum Scharfstellen auf das Bild tippen.</p>
+      {!scanning && <button className="scan-btn" onClick={() => start()} disabled={busy}>Kamera starten</button>}
+      <video ref={videoRef} playsInline muted onClick={tapFocus} style={{ display: scanning ? 'block' : 'none' }} />
       {scanning && (
-        <>
-          <video ref={videoRef} playsInline muted />
-          <button className="scan-btn secondary" onClick={stop}>Abbrechen</button>
-        </>
+        <div className="scan-tools">
+          {torchOk && <button onClick={toggleTorch}>{torchOn ? 'Licht aus' : 'Licht an'}</button>}
+          {devices.length > 1 && <button onClick={nextCamera}>Kamera wechseln</button>}
+          <button onClick={toggleCompat}>{compat ? 'Standard-Scanner' : 'Kompatibler Scanner'}</button>
+          <button onClick={stop}>Abbrechen</button>
+        </div>
       )}
       <div className="inline-add manual">
-        <input inputMode="numeric" placeholder="Code manuell eingeben" value={manual} onChange={e => setManual(e.target.value)} />
-        <button onClick={() => manual.trim() && handleCode(manual.trim())}>Suchen</button>
+        <input inputMode="numeric" placeholder="Code manuell eingeben (8, 12 oder 13 Ziffern)" value={manual} onChange={e => setManual(e.target.value)} />
+        <button disabled={busy} onClick={() => manual.trim() && handle(manual.trim())}>Suchen</button>
       </div>
       {info && <div className="msg">{info}</div>}
     </div>
   )
 }
 
-/* ---------- Formular: neue Flasche ---------- */
+/* ---------- Formular: Flasche anlegen oder bearbeiten ---------- */
 
 async function ensureRoom(rooms, name) {
   const existing = rooms.find(r => r.name.toLowerCase() === name.toLowerCase())
@@ -530,57 +662,202 @@ async function ensureLocation(locations, roomId, name) {
   return data.id
 }
 
-function AddForm({ prefill, cats, rooms, locations, reload }) {
-  const mains = cats.filter(c => !c.parent_id)
-  const [f, setF] = useState({
-    brand: prefill?.brand || '',
-    name: prefill?.name || '',
-    mainId: '',
-    subId: '',
-    abv: '',
-    size: prefill?.size_ml && SIZES.includes(prefill.size_ml) ? String(prefill.size_ml) : (prefill?.size_ml ? 'other' : '700'),
-    customSize: prefill?.size_ml && !SIZES.includes(prefill.size_ml) ? String(prefill.size_ml) : '',
-    vintage: '', country: '', region: '',
-    status: 'closed', quantity: 1,
-    roomId: lsGet('by_room') || '',
-    locId: lsGet('by_loc') || '',
+async function ensureLookup(lookups, kind, name, country) {
+  const existing = lookups.find(l => l.kind === kind && l.name.toLowerCase() === name.toLowerCase() &&
+    (kind === 'country' || !l.country || l.country === country))
+  if (existing) return existing.name
+  const { error } = await supabase.from('lookup_values').insert({ kind, name, country: kind === 'region' ? (country || null) : null })
+  if (error) throw error
+  return name
+}
+
+function initialForm(bottle, prefill, cats) {
+  const edit = !!bottle
+  const src = bottle || prefill || {}
+  const catById = Object.fromEntries(cats.map(c => [c.id, c]))
+  let mainId = src.mainId || ''
+  let subId = ''
+  if (src.category_id && catById[src.category_id]) {
+    const c = catById[src.category_id]
+    if (c.parent_id) { mainId = c.parent_id; subId = c.id } else { mainId = c.id }
+  }
+  const size = src.size_ml
+  return {
+    brand: src.brand || '',
+    name: src.name || '',
+    mainId, subId,
+    abv: src.abv === null || src.abv === undefined ? '' : String(src.abv),
+    size: size ? (SIZES.includes(size) ? String(size) : 'other') : '700',
+    customSize: size && !SIZES.includes(size) ? String(size) : '',
+    vintage: src.vintage || '',
+    country: src.country || '',
+    region: src.region || '',
+    newCountry: '', newRegion: '',
+    status: edit ? bottle.status : 'closed',
+    quantity: edit ? bottle.quantity : 1,
+    fill_percent: edit ? bottle.fill_percent : 100,
+    roomId: edit ? (bottle.room_id || '') : (lsGet('by_room') || ''),
+    locId: edit ? (bottle.location_id || '') : (lsGet('by_loc') || ''),
     newRoom: '', newLoc: '',
-    is_collection: false, is_sample: false, is_purchase: false,
-    min_stock: '', barcode: prefill?.barcode || '', notes: '',
-  })
-  const [msg, setMsg] = useState(prefill?.barcode ? (prefill.brand || prefill.name ? 'Produktdaten übernommen – bitte prüfen und ergänzen.' : 'Barcode übernommen – keine Produktdaten gefunden, bitte manuell ausfüllen.') : '')
+    is_collection: !!src.is_collection,
+    is_sample: edit ? bottle.is_sample : false,
+    is_purchase: false,
+    min_stock: src.min_stock === null || src.min_stock === undefined ? '' : String(src.min_stock),
+    barcode: src.barcode || '',
+    notes: edit ? (bottle.notes || '') : '',
+  }
+}
+
+const SLOTS = [['front', 'Vorderseite'], ['back', 'Rückseite'], ['side', 'Seite (Füllstand)']]
+
+function ImageSlot({ label, url, onPick, onRemove }) {
+  const inputRef = useRef(null)
+  return (
+    <div className="img-slot">
+      <div className="img-box" onClick={() => inputRef.current?.click()}>
+        {url ? <img src={url} alt={label} /> : <span>+ Foto</span>}
+      </div>
+      <div className="img-label">{label}</div>
+      {url && <button type="button" className="link-danger" onClick={onRemove}>Entfernen</button>}
+      <input ref={inputRef} type="file" accept="image/*" hidden
+        onChange={e => { const f = e.target.files?.[0]; if (f) onPick(f); e.target.value = '' }} />
+    </div>
+  )
+}
+
+function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, reload, onDone }) {
+  const edit = !!bottle
+  const mains = cats.filter(c => !c.parent_id)
+  const [f, setF] = useState(() => initialForm(bottle, prefill, cats))
+  const [msg, setMsg] = useState(prefill?.note || '')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState(false)
+
+  // Bilder: pro Platz entweder vorhandener Pfad, neue Datei oder entfernt
+  const [imgs, setImgs] = useState(() => ({
+    front: { path: bottle?.image_front || null, file: null, preview: null, removed: false },
+    back: { path: bottle?.image_back || null, file: null, preview: null, removed: false },
+    side: { path: bottle?.image_side || null, file: null, preview: null, removed: false },
+  }))
+  const [signed, setSigned] = useState({})
+
+  useEffect(() => {
+    const paths = [bottle?.image_front, bottle?.image_back, bottle?.image_side].filter(Boolean)
+    if (paths.length === 0) return
+    supabase.storage.from(BUCKET).createSignedUrls(paths, 3600).then(({ data }) => {
+      const map = {}
+      ;(data || []).forEach(x => { if (x.signedUrl) map[x.path] = x.signedUrl })
+      setSigned(map)
+    })
+  }, [bottle])
 
   const set = (k, v) => setF(prev => ({ ...prev, [k]: v }))
   const main = mains.find(c => c.id === f.mainId)
   const subs = cats.filter(c => c.parent_id === f.mainId)
   const roomLocs = locations.filter(l => l.room_id === f.roomId)
-
   const roomsValid = rooms.some(r => r.id === f.roomId)
   const locValid = locations.some(l => l.id === f.locId && l.room_id === f.roomId)
+
+  const countries = useMemo(() => {
+    const names = lookups.filter(l => l.kind === 'country').map(l => l.name)
+    if (f.country && !names.includes(f.country)) names.push(f.country)
+    return [...new Set(names)].sort((a, b) => a.localeCompare(b, 'de'))
+  }, [lookups, f.country])
+
+  const regions = useMemo(() => {
+    const names = lookups
+      .filter(l => l.kind === 'region' && (!f.country || !l.country || l.country === f.country))
+      .map(l => l.name)
+    if (f.region && !names.includes(f.region)) names.push(f.region)
+    return [...new Set(names)].sort((a, b) => a.localeCompare(b, 'de'))
+  }, [lookups, f.country, f.region])
+
+  function pickImage(slot, file) {
+    setImgs(prev => ({ ...prev, [slot]: { ...prev[slot], file, preview: URL.createObjectURL(file), removed: false } }))
+  }
+  function removeImage(slot) {
+    setImgs(prev => ({ ...prev, [slot]: { path: prev[slot].path, file: null, preview: null, removed: true } }))
+  }
+  function slotUrl(slot) {
+    const s = imgs[slot]
+    if (s.preview) return s.preview
+    if (s.removed) return null
+    return s.path ? signed[s.path] || null : null
+  }
+
+  // Bilder hochladen / entfernen und die Pfade in der Flasche eintragen
+  async function syncImages(bottleId) {
+    const update = {}
+    const toDelete = []
+    for (const [slot] of SLOTS) {
+      const s = imgs[slot]
+      if (s.file) {
+        const blob = await resizeImage(s.file, 1000, 0.8)
+        const path = `${userId}/${bottleId}/${slot}-${Date.now()}.jpg`
+        const up = await supabase.storage.from(BUCKET).upload(path, blob, { contentType: 'image/jpeg' })
+        if (up.error) throw up.error
+        update[`image_${slot}`] = path
+        if (s.path) toDelete.push(s.path)
+        if (slot === 'front') {
+          const thumb = await resizeImage(s.file, 240, 0.7)
+          const tpath = `${userId}/${bottleId}/thumb-${Date.now()}.jpg`
+          const tu = await supabase.storage.from(BUCKET).upload(tpath, thumb, { contentType: 'image/jpeg' })
+          if (tu.error) throw tu.error
+          update.image_thumb = tpath
+          if (bottle?.image_thumb) toDelete.push(bottle.image_thumb)
+        }
+      } else if (s.removed && s.path) {
+        update[`image_${slot}`] = null
+        toDelete.push(s.path)
+        if (slot === 'front') {
+          update.image_thumb = null
+          if (bottle?.image_thumb) toDelete.push(bottle.image_thumb)
+        }
+      }
+    }
+    if (Object.keys(update).length > 0) {
+      const { error } = await supabase.from('bottles').update(update).eq('id', bottleId)
+      if (error) throw error
+    }
+    if (toDelete.length > 0) await supabase.storage.from(BUCKET).remove(toDelete)
+  }
+
+  function validate() {
+    if (!f.brand.trim() || !f.name.trim()) return 'Marke und Name sind Pflichtfelder.'
+    if (!f.mainId) return 'Bitte eine Kategorie wählen.'
+    if (subs.length > 0 && !f.subId) return 'Bitte eine Subkategorie wählen.'
+    if (main?.abv_required && f.abv === '') return 'Bei dieser Kategorie ist der Alkoholgehalt Pflicht.'
+    const sizeMl = f.size === 'other' ? parseInt(f.customSize, 10) : parseInt(f.size, 10)
+    if (!sizeMl || sizeMl <= 0) return 'Bitte eine Flaschengröße angeben.'
+    if (!f.roomId || (f.roomId === '__new' && !f.newRoom.trim())) return 'Bitte einen Raum wählen.'
+    if (f.locId === '__new' && !f.newLoc.trim()) return 'Bitte einen Namen für den neuen Ort eingeben.'
+    if (f.country === '__new' && !f.newCountry.trim()) return 'Bitte einen Namen für das neue Land eingeben.'
+    if (f.region === '__new' && !f.newRegion.trim()) return 'Bitte einen Namen für die neue Region eingeben.'
+    return ''
+  }
 
   async function save() {
     setError('')
     setMsg('')
-    if (!f.brand.trim() || !f.name.trim()) return setError('Marke und Name sind Pflichtfelder.')
-    if (!f.mainId) return setError('Bitte eine Kategorie wählen.')
-    if (subs.length > 0 && !f.subId) return setError('Bitte eine Subkategorie wählen.')
-    if (main?.abv_required && f.abv === '') return setError('Bei dieser Kategorie ist der Alkoholgehalt Pflicht.')
-    const sizeMl = f.size === 'other' ? parseInt(f.customSize, 10) : parseInt(f.size, 10)
-    if (!sizeMl || sizeMl <= 0) return setError('Bitte eine Flaschengröße angeben.')
-    if (!f.roomId || (f.roomId === '__new' && !f.newRoom.trim())) return setError('Bitte einen Raum wählen.')
-    if (f.locId === '__new' && !f.newLoc.trim()) return setError('Bitte einen Namen für den neuen Ort eingeben.')
+    const problem = validate()
+    if (problem) return setError(problem)
 
     setBusy(true)
     try {
+      const sizeMl = f.size === 'other' ? parseInt(f.customSize, 10) : parseInt(f.size, 10)
       const roomId = f.roomId === '__new' ? await ensureRoom(rooms, f.newRoom.trim()) : f.roomId
       let locationId = null
       if (f.locId === '__new') locationId = await ensureLocation(locations, roomId, f.newLoc.trim())
-      else if (f.locId && locValid) locationId = f.locId
+      else if (f.locId && locations.some(l => l.id === f.locId && l.room_id === roomId)) locationId = f.locId
 
-      const qty = Math.max(1, parseInt(f.quantity, 10) || 1)
-      const { data, error: e1 } = await supabase.from('bottles').insert({
+      let country = f.country === '__new' ? await ensureLookup(lookups, 'country', f.newCountry.trim(), null) : f.country
+      let region = f.region === '__new' ? await ensureLookup(lookups, 'region', f.newRegion.trim(), country) : f.region
+
+      const qtyParsed = parseInt(f.quantity, 10)
+      const qty = Number.isNaN(qtyParsed) ? 1 : Math.max(edit ? 0 : 1, qtyParsed)
+
+      const row = {
         category_id: f.subId || f.mainId,
         room_id: roomId,
         location_id: locationId,
@@ -589,19 +866,41 @@ function AddForm({ prefill, cats, rooms, locations, reload }) {
         vintage: f.vintage.trim() || null,
         abv: f.abv === '' ? null : parseFloat(String(f.abv).replace(',', '.')),
         size_ml: sizeMl,
-        country: f.country.trim() || null,
-        region: f.region.trim() || null,
+        country: country || null,
+        region: region || null,
         status: f.status,
         quantity: qty,
-        fill_percent: f.status === 'open' ? 100 : (f.status === 'empty' ? 0 : 100),
+        fill_percent: f.status === 'open' ? Number(f.fill_percent) : (f.status === 'empty' ? 0 : 100),
         is_collection: f.is_collection,
         is_sample: f.is_sample,
         barcode: f.barcode.trim() || null,
         notes: f.notes.trim() || null,
         min_stock: f.min_stock === '' ? null : parseInt(f.min_stock, 10),
-      }).select('id').single()
-      if (e1) throw e1
+      }
 
+      lsSet('by_room', roomId)
+      lsSet('by_loc', locationId || '')
+
+      if (edit) {
+        const { error: e1 } = await supabase.from('bottles').update(row).eq('id', bottle.id)
+        if (e1) throw e1
+        if (qty !== bottle.quantity) {
+          await supabase.from('movements').insert({ bottle_id: bottle.id, type: 'adjustment', quantity: qty - bottle.quantity, notes: 'Manuell geändert' })
+        }
+        try {
+          await syncImages(bottle.id)
+        } catch (e) {
+          await reload()
+          setBusy(false)
+          return setError('Gespeichert, aber die Bilder konnten nicht verarbeitet werden: ' + e.message)
+        }
+        await reload()
+        onDone && onDone()
+        return
+      }
+
+      const { data, error: e1 } = await supabase.from('bottles').insert(row).select('id').single()
+      if (e1) throw e1
       await supabase.from('movements').insert({
         bottle_id: data.id,
         type: f.is_purchase ? 'purchase' : 'adjustment',
@@ -609,14 +908,20 @@ function AddForm({ prefill, cats, rooms, locations, reload }) {
         notes: f.is_purchase ? null : 'Erfassung',
       })
 
-      lsSet('by_room', roomId)
-      lsSet('by_loc', locationId || '')
-      setMsg(`Gespeichert: ${f.brand.trim()} ${f.name.trim()}`)
+      let imageProblem = ''
+      try { await syncImages(data.id) } catch (e) { imageProblem = ' Die Bilder konnten nicht hochgeladen werden: ' + e.message }
+
+      setMsg(`Gespeichert: ${row.brand} ${row.name}.${imageProblem}`)
       setF(prev => ({
         ...prev,
         brand: '', name: '', vintage: '', abv: '', barcode: '', notes: '', quantity: 1,
-        roomId, locId: locationId || '', newRoom: '', newLoc: '',
+        roomId, locId: locationId || '', newRoom: '', newLoc: '', newCountry: '', newRegion: '',
       }))
+      setImgs({
+        front: { path: null, file: null, preview: null, removed: false },
+        back: { path: null, file: null, preview: null, removed: false },
+        side: { path: null, file: null, preview: null, removed: false },
+      })
       reload()
     } catch (e) {
       setError('Fehler beim Speichern: ' + e.message)
@@ -624,8 +929,30 @@ function AddForm({ prefill, cats, rooms, locations, reload }) {
     setBusy(false)
   }
 
+  async function remove() {
+    setBusy(true)
+    setError('')
+    try {
+      const paths = [bottle.image_front, bottle.image_back, bottle.image_side, bottle.image_thumb].filter(Boolean)
+      if (paths.length > 0) await supabase.storage.from(BUCKET).remove(paths)
+      const { error: e1 } = await supabase.from('bottles').delete().eq('id', bottle.id)
+      if (e1) throw e1
+      await reload()
+      onDone && onDone()
+    } catch (e) {
+      setError('Fehler beim Löschen: ' + e.message)
+      setBusy(false)
+    }
+  }
+
   return (
     <div className="form">
+      {edit && (
+        <div className="edit-head">
+          <button type="button" className="link-back" onClick={onDone}>← Zurück</button>
+          <h2>Flasche bearbeiten</h2>
+        </div>
+      )}
       {msg && <div className="msg">{msg}</div>}
       {error && <div className="msg error">{error}</div>}
 
@@ -656,18 +983,33 @@ function AddForm({ prefill, cats, rooms, locations, reload }) {
       </select>
       {f.size === 'other' && <input placeholder="Größe in ml" inputMode="numeric" value={f.customSize} onChange={e => set('customSize', e.target.value)} />}
 
-      <div className="two">
-        <input placeholder="Herkunftsland" value={f.country} onChange={e => set('country', e.target.value)} />
-        <input placeholder="Region / Stil" value={f.region} onChange={e => set('region', e.target.value)} />
-      </div>
+      <select value={f.country} onChange={e => setF(prev => ({ ...prev, country: e.target.value, region: prev.region === '__new' ? '' : prev.region }))}>
+        <option value="">Herkunftsland wählen</option>
+        {countries.map(c => <option key={c} value={c}>{c}</option>)}
+        <option value="__new">+ Neues Land…</option>
+      </select>
+      {f.country === '__new' && <input placeholder="Name des neuen Landes" value={f.newCountry} onChange={e => set('newCountry', e.target.value)} />}
+
+      <select value={f.region} onChange={e => set('region', e.target.value)}>
+        <option value="">Region / Stil wählen</option>
+        {regions.map(r => <option key={r} value={r}>{r}</option>)}
+        <option value="__new">+ Neue Region / Stil…</option>
+      </select>
+      {f.region === '__new' && <input placeholder="Name der neuen Region / des Stils" value={f.newRegion} onChange={e => set('newRegion', e.target.value)} />}
+
       <input placeholder="Jahrgang (optional)" value={f.vintage} onChange={e => set('vintage', e.target.value)} />
 
       <div className="two">
         <select value={f.status} onChange={e => set('status', e.target.value)}>
           {Object.entries(STATUS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
         </select>
-        <input type="number" min="1" placeholder="Anzahl" value={f.quantity} onChange={e => set('quantity', e.target.value)} />
+        <input type="number" min={edit ? 0 : 1} placeholder="Anzahl" value={f.quantity} onChange={e => set('quantity', e.target.value)} />
       </div>
+      {f.status === 'open' && (
+        <select value={f.fill_percent} onChange={e => set('fill_percent', e.target.value)}>
+          {[100, 90, 75, 50, 25, 10].map(v => <option key={v} value={v}>Füllstand {v} %</option>)}
+        </select>
+      )}
 
       <select value={roomsValid || f.roomId === '__new' ? f.roomId : ''} onChange={e => setF(prev => ({ ...prev, roomId: e.target.value, locId: '' }))}>
         <option value="">Raum wählen *</option>
@@ -685,15 +1027,34 @@ function AddForm({ prefill, cats, rooms, locations, reload }) {
       )}
       {f.locId === '__new' && <input placeholder="Name des neuen Ortes, z. B. Kiste 4" value={f.newLoc} onChange={e => set('newLoc', e.target.value)} />}
 
+      <div className="img-grid">
+        {SLOTS.map(([slot, label]) => (
+          <ImageSlot key={slot} label={label} url={slotUrl(slot)} onPick={file => pickImage(slot, file)} onRemove={() => removeImage(slot)} />
+        ))}
+      </div>
+
       <input placeholder="Barcode (optional)" inputMode="numeric" value={f.barcode} onChange={e => set('barcode', e.target.value)} />
       <input placeholder="Mindestbestand (optional)" type="number" min="0" value={f.min_stock} onChange={e => set('min_stock', e.target.value)} />
       <input placeholder="Notizen (optional)" value={f.notes} onChange={e => set('notes', e.target.value)} />
 
       <label className="check"><input type="checkbox" checked={f.is_collection} onChange={e => set('is_collection', e.target.checked)} /> Gehört zur Sammlung</label>
       <label className="check"><input type="checkbox" checked={f.is_sample} onChange={e => set('is_sample', e.target.checked)} /> Gratis-Muster (Sample)</label>
-      <label className="check"><input type="checkbox" checked={f.is_purchase} onChange={e => set('is_purchase', e.target.checked)} /> Neu gekauft (Wareneingang)</label>
+      {!edit && <label className="check"><input type="checkbox" checked={f.is_purchase} onChange={e => set('is_purchase', e.target.checked)} /> Neu gekauft (Wareneingang)</label>}
 
-      <button className="save-btn" onClick={save} disabled={busy}>{busy ? 'Speichert…' : 'Speichern'}</button>
+      <button className="save-btn" onClick={save} disabled={busy}>{busy ? 'Speichert…' : (edit ? 'Änderungen speichern' : 'Speichern')}</button>
+
+      {edit && !confirmDelete && (
+        <button type="button" className="danger-btn" onClick={() => setConfirmDelete(true)} disabled={busy}>Flasche löschen</button>
+      )}
+      {edit && confirmDelete && (
+        <div className="confirm-box">
+          <p>Wirklich löschen? Die Flasche, ihre Bilder und ihre Bewegungen werden endgültig entfernt.</p>
+          <div className="two">
+            <button type="button" className="danger-btn" onClick={remove} disabled={busy}>Ja, löschen</button>
+            <button type="button" className="scan-btn secondary" onClick={() => setConfirmDelete(false)}>Abbrechen</button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
