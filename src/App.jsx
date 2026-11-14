@@ -5,6 +5,7 @@ import {
   digitsOnly, codeVariants, codeWarning, lookupBarcode, resizeImage, blobToBase64,
 } from './utils'
 import Rooms from './Rooms'
+import Chat from './Chat'
 import Einkauf from './Einkauf'
 import Lieferung from './Lieferung'
 import Export from './Export'
@@ -173,6 +174,8 @@ function Main({ userId, onLogout }) {
   const [prefill, setPrefill] = useState({ key: 0, data: null })
   const [editId, setEditId] = useState(null)
   const [series, setSeries] = useState({ roomId: '', locId: '' })
+  const [wishlist, setWishlist] = useState([])
+  const [scanView, setScanView] = useState(null)
 
   async function loadThumbs(rows) {
     const paths = rows.map(b => b.image_thumb).filter(Boolean)
@@ -184,12 +187,13 @@ function Main({ userId, onLogout }) {
   }
 
   async function loadAll() {
-    const [b, r, l, c, lv] = await Promise.all([
+    const [b, r, l, c, lv, wl] = await Promise.all([
       supabase.from('bottles').select('*').order('brand').order('name'),
       supabase.from('rooms').select('*').order('sort_order').order('name'),
       supabase.from('locations').select('*').order('name'),
       supabase.from('categories').select('*').order('sort_order'),
       supabase.from('lookup_values').select('*').order('name'),
+      supabase.from('wishlist').select('*').order('created_at'),
     ])
     const err = b.error || r.error || l.error || c.error
     if (err) {
@@ -201,6 +205,7 @@ function Main({ userId, onLogout }) {
       setLocations(l.data)
       setCats(c.data)
       setLookups(lv.data || [])
+      setWishlist(wl.error ? [] : (wl.data || []))
       loadThumbs(b.data)
     }
     setLoading(false)
@@ -242,7 +247,6 @@ function Main({ userId, onLogout }) {
     ['scanner', 'Scanner'],
     ['add', '+ Neu'],
     ['buy', 'Einkauf'],
-    ['deliv', 'Lieferung'],
     ['export', 'Export'],
   ]
   const editing = editId ? bottles.find(b => b.id === editId) : null
@@ -251,7 +255,7 @@ function Main({ userId, onLogout }) {
     <Shell onLogout={onLogout}>
       <nav>
         {tabs.map(([id, label]) => (
-          <button key={id} onClick={() => { setTab(id); setEditId(null); if (id === 'bottles' || id === 'rooms') setSeries({ roomId: '', locId: '' }) }} className={tab === id ? 'active' : ''}>{label}</button>
+          <button key={id} onClick={() => { setTab(id); setEditId(null); setScanView(null); if (id === 'bottles' || id === 'rooms') setSeries({ roomId: '', locId: '' }) }} className={tab === id ? 'active' : ''}>{label}</button>
         ))}
       </nav>
       <main>
@@ -268,12 +272,24 @@ function Main({ userId, onLogout }) {
         {!loading && tab === 'rooms' && (
           <Rooms bottles={bottles} rooms={rooms} locations={locations} reload={loadAll} />
         )}
-        {tab === 'scanner' && <Scanner onCode={handleCode} onLabel={handleLabel} />}
-        {!loading && tab === 'buy' && <Einkauf bottles={bottles} reload={loadAll} />}
-        {!loading && tab === 'deliv' && (
-          <Lieferung bottles={bottles} cats={cats} rooms={rooms} locations={locations} lookups={lookups}
-            reload={loadAll} onDone={() => setTab('bottles')} />
+        {tab === 'scanner' && scanView !== 'deliv' && (
+          <>
+            <Scanner onCode={handleCode} onLabel={handleLabel} />
+            <div className="card column deliv-entry">
+              <h3>Lieferschein oder Rechnung</h3>
+              <p>Beleg als Foto oder PDF einlesen, die KI erfasst alle Positionen auf einmal.</p>
+              <button className="scan-btn secondary" style={{ marginTop: 0 }} onClick={() => setScanView('deliv')}>Beleg erfassen</button>
+            </div>
+          </>
         )}
+        {!loading && tab === 'scanner' && scanView === 'deliv' && (
+          <>
+            <button className="link-back" onClick={() => setScanView(null)}>← Zurück zum Scanner</button>
+            <Lieferung bottles={bottles} cats={cats} rooms={rooms} locations={locations} lookups={lookups}
+              reload={loadAll} onDone={() => { setScanView(null); setTab('bottles') }} />
+          </>
+        )}
+        {!loading && tab === 'buy' && <Einkauf bottles={bottles} wishlist={wishlist} reload={loadAll} />}
         {!loading && tab === 'export' && (
           <Export bottles={bottles} cats={cats} rooms={rooms} locations={locations} reload={loadAll} />
         )}
@@ -284,6 +300,8 @@ function Main({ userId, onLogout }) {
             onFinish={() => { setSeries({ roomId: '', locId: '' }); setTab('bottles') }} />
         )}
       </main>
+      <Chat hidden={tab === 'add' || (tab === 'bottles' && !!editId)}
+        onOpenBottle={id => { setTab('bottles'); setEditId(id) }} reload={loadAll} />
     </Shell>
   )
 }

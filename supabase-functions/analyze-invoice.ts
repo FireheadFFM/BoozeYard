@@ -19,6 +19,7 @@ Erfasse nur Waren, die in den Barbestand gehören: Spirituosen, Liköre, Wein, B
 Lies Zahlen exakt vom Beleg ab. Rate keine Preise, Mengen oder EANs. Fehlt eine Angabe auf dem Beleg, lass das Feld weg.
 Menge ist die Anzahl Flaschen (bzw. Einheiten). Steht eine Position als Karton mit mehreren Flaschen, rechne auf Flaschen um und gib den Preis pro Flasche an.
 Der Einzelpreis ist der Preis pro Flasche so, wie er auf dem Beleg steht (netto oder brutto, je nach Beleg).
+Vierstellige Zahlen am Ende einer Bezeichnung, die kein plausibles Jahr zwischen 1900 und 2030 sind (zum Beispiel 3305, 0805, 0721, 0203), sind interne Artikelcodes des Händlers und gehören nicht in den Namen. Jahreszahlen übernimmst du nur, wenn sie ein Jahrgang oder Alter sein können.
 Marke und Name trennst du sauber (Marke = Hersteller/Marke, Name = Produktname inkl. Alter/Abfüllung ohne Größe und Alkoholgehalt).
 Fehlen Alkoholgehalt, Land, Region oder Kategorie auf dem Beleg, darfst du sie aus deinem Fachwissen ergänzen, aber nur wenn du dir bei dem Produkt sicher bist. Trage dann die Namen dieser Felder in "enriched" ein.
 Gib alles ausschließlich über das Werkzeug save_invoice ab.`;
