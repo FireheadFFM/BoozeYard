@@ -4,6 +4,10 @@ import {
   SIZES, STATUS, BUCKET, lsGet, lsSet, abvLabel,
   digitsOnly, codeVariants, codeWarning, lookupBarcode, resizeImage, blobToBase64,
 } from './utils'
+import Rooms from './Rooms'
+import Einkauf from './Einkauf'
+import Lieferung from './Lieferung'
+import Export from './Export'
 import './App.css'
 
 /* ---------- Logos ---------- */
@@ -237,6 +241,9 @@ function Main({ userId, onLogout }) {
     ['rooms', 'Lagerorte'],
     ['scanner', 'Scanner'],
     ['add', '+ Neu'],
+    ['buy', 'Einkauf'],
+    ['deliv', 'Lieferung'],
+    ['export', 'Export'],
   ]
   const editing = editId ? bottles.find(b => b.id === editId) : null
 
@@ -262,6 +269,14 @@ function Main({ userId, onLogout }) {
           <Rooms bottles={bottles} rooms={rooms} locations={locations} reload={loadAll} />
         )}
         {tab === 'scanner' && <Scanner onCode={handleCode} onLabel={handleLabel} />}
+        {!loading && tab === 'buy' && <Einkauf bottles={bottles} reload={loadAll} />}
+        {!loading && tab === 'deliv' && (
+          <Lieferung bottles={bottles} cats={cats} rooms={rooms} locations={locations} lookups={lookups}
+            reload={loadAll} onDone={() => setTab('bottles')} />
+        )}
+        {!loading && tab === 'export' && (
+          <Export bottles={bottles} cats={cats} rooms={rooms} locations={locations} reload={loadAll} />
+        )}
         {!loading && tab === 'add' && (
           <BottleForm key={prefill.key} userId={userId} prefill={prefill.data} cats={cats} rooms={rooms}
             locations={locations} lookups={lookups} bottles={bottles} reload={loadAll}
@@ -320,6 +335,13 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit })
 
   function fail(error) {
     setMsg('Fehler: ' + error.message)
+  }
+
+  async function toggleReorder(b) {
+    setMsg('')
+    const { error } = await supabase.from('bottles').update({ reorder: !b.reorder }).eq('id', b.id)
+    if (error) return setMsg('Fehler: ' + error.message)
+    await reload()
   }
 
   async function openOne(b) {
@@ -483,7 +505,8 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit })
                 {label && label !== 'Standard' && <span className="tag">{label}</span>}
                 {b.is_collection && <span className="tag">Sammlung</span>}
                 {b.is_sample && <span className="tag">Sample</span>}
-                {b.min_stock !== null && b.status === 'closed' && b.quantity < b.min_stock && <span className="tag warn">Nachkaufen</span>}
+                {b.min_stock !== null && b.status === 'closed' && b.quantity < b.min_stock && !b.reorder && <span className="tag warn">Unter Mindestbestand</span>}
+                <button type="button" className={'tag tag-btn' + (b.reorder ? ' on' : '')} onClick={() => toggleReorder(b)}>{b.reorder ? 'Vorgemerkt ✓' : '+ Nachkaufen'}</button>
               </div>
             </div>
             {delId !== b.id && (
@@ -515,70 +538,6 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit })
 
 /* ---------- Lagerorte ---------- */
 
-function Rooms({ bottles, rooms, locations, reload }) {
-  const [newRoom, setNewRoom] = useState('')
-  const [newLoc, setNewLoc] = useState({})
-  const [msg, setMsg] = useState('')
-
-  function count(filterFn) {
-    return bottles.filter(b => b.status !== 'empty' && filterFn(b)).reduce((s, b) => s + b.quantity, 0)
-  }
-
-  async function addRoom() {
-    const name = newRoom.trim()
-    if (!name) return
-    const { error } = await supabase.from('rooms').insert({ name })
-    if (error) return setMsg('Fehler: ' + error.message)
-    setNewRoom('')
-    setMsg('')
-    reload()
-  }
-
-  async function addLocation(roomId) {
-    const name = (newLoc[roomId] || '').trim()
-    if (!name) return
-    const { error } = await supabase.from('locations').insert({ room_id: roomId, name })
-    if (error) return setMsg('Fehler: ' + error.message)
-    setNewLoc({ ...newLoc, [roomId]: '' })
-    setMsg('')
-    reload()
-  }
-
-  return (
-    <>
-      {msg && <div className="msg error">{msg}</div>}
-      {rooms.length === 0 && <div className="empty">Noch keine Lagerorte angelegt.</div>}
-      {rooms.map(r => {
-        const locs = locations.filter(l => l.room_id === r.id)
-        return (
-          <div key={r.id} className="card column">
-            <div className="room-head">
-              <h3>{r.name}</h3>
-              <span className="badge">{count(b => b.room_id === r.id)} Flaschen</span>
-            </div>
-            <div className="chips">
-              {locs.length === 0 && <span className="muted">Keine Unterorte</span>}
-              {locs.map(l => (
-                <span key={l.id} className="chip">{l.name} · {count(b => b.location_id === l.id)}</span>
-              ))}
-            </div>
-            <div className="inline-add">
-              <input placeholder="Neuer Ort, z. B. Kiste 4" value={newLoc[r.id] || ''} onChange={e => setNewLoc({ ...newLoc, [r.id]: e.target.value })} />
-              <button onClick={() => addLocation(r.id)}>Hinzufügen</button>
-            </div>
-          </div>
-        )
-      })}
-      <div className="card column">
-        <div className="inline-add">
-          <input placeholder="Neuer Raum" value={newRoom} onChange={e => setNewRoom(e.target.value)} />
-          <button onClick={addRoom}>Anlegen</button>
-        </div>
-      </div>
-    </>
-  )
-}
-
 /* ---------- Scanner ---------- */
 
 const FORMATS = ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128']
@@ -595,6 +554,42 @@ async function createDetector(preferWasm) {
   return { detector: new BarcodeDetector({ formats: FORMATS }), wasm: true }
 }
 
+// Barcode aus einem Foto lesen: mehrere Versuche mit Größen, Drehungen und Kontrast
+async function decodeFromFile(file) {
+  let bmp
+  try { bmp = await createImageBitmap(file, { imageOrientation: 'from-image' }) } catch { bmp = await createImageBitmap(file) }
+  const make = (maxSide, rot, enhance) => {
+    const scale = Math.min(1, maxSide / Math.max(bmp.width, bmp.height))
+    const w = Math.round(bmp.width * scale)
+    const h = Math.round(bmp.height * scale)
+    const c = document.createElement('canvas')
+    const swap = rot === 90 || rot === 270
+    c.width = swap ? h : w
+    c.height = swap ? w : h
+    const ctx = c.getContext('2d')
+    if (enhance) ctx.filter = 'grayscale(1) contrast(1.6)'
+    ctx.translate(c.width / 2, c.height / 2)
+    ctx.rotate((rot * Math.PI) / 180)
+    ctx.drawImage(bmp, -w / 2, -h / 2, w, h)
+    return c
+  }
+  const attempts = [[2400, 0, false], [1400, 0, false], [1400, 0, true], [2400, 90, false], [2400, 270, false], [1000, 0, true]]
+  for (const wasm of [false, true]) {
+    let detector
+    try { detector = (await createDetector(wasm)).detector } catch { continue }
+    for (const [side, rot, enh] of attempts) {
+      try {
+        const found = await detector.detect(make(side, rot, enh))
+        if (found.length > 0 && found[0].rawValue) { bmp.close && bmp.close(); return found[0].rawValue }
+      } catch { /* nächster Versuch */ }
+    }
+  }
+  bmp.close && bmp.close()
+  return null
+}
+
+const camIsFront = d => /front|user|selfie|vorn/i.test(d.label || '')
+
 function Scanner({ onCode, onLabel, compact = false, autoStart = false, onClose }) {
   const videoRef = useRef(null)
   const streamRef = useRef(null)
@@ -609,6 +604,9 @@ function Scanner({ onCode, onLabel, compact = false, autoStart = false, onClose 
   const [devIdx, setDevIdx] = useState(0)
   const [compat, setCompat] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [zoomCaps, setZoomCaps] = useState(null)
+  const [zoom, setZoom] = useState(1)
+  const photoRef = useRef(null)
   const [labelOpen, setLabelOpen] = useState(false)
   const [lf, setLf] = useState({ front: null, back: null })
   const [lp, setLp] = useState({ front: null, back: null })
@@ -622,6 +620,7 @@ function Scanner({ onCode, onLabel, compact = false, autoStart = false, onClose 
     trackRef.current = null
     setScanning(false)
     setTorchOn(false)
+    setZoomCaps(null)
   }
 
   useEffect(() => { if (autoStart) start(); return () => stop() }, [])
@@ -657,16 +656,39 @@ function Scanner({ onCode, onLabel, compact = false, autoStart = false, onClose 
     setBusy(false)
   }
 
+  async function barcodePhoto(e) {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+    stop()
+    setBusy(true)
+    setInfo('Foto wird gelesen…')
+    try {
+      const code = await decodeFromFile(file)
+      if (code) { setBusy(false); await handle(code); return }
+      setInfo('Auf dem Foto wurde kein Barcode erkannt. Bitte den Strichcode näher, gerade und scharf fotografieren oder den Code unten eintippen.')
+    } catch {
+      setInfo('Das Foto konnte nicht gelesen werden. Bitte den Code unten eintippen.')
+    }
+    setBusy(false)
+  }
+
   async function start(deviceId, forceWasm) {
     setInfo('')
     stop()
     try {
-      const video = {
-        width: { ideal: 1920 },
-        height: { ideal: 1080 },
-        ...(deviceId ? { deviceId: { exact: deviceId } } : { facingMode: { ideal: 'environment' } }),
+      const wanted = deviceId || lsGet('cam_id') || ''
+      const base = { width: { ideal: 1920 }, height: { ideal: 1080 } }
+      let stream
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { ...base, ...(wanted ? { deviceId: { exact: wanted } } : { facingMode: { ideal: 'environment' } }) },
+        })
+      } catch (err) {
+        if (!wanted) throw err
+        lsSet('cam_id', '')
+        stream = await navigator.mediaDevices.getUserMedia({ video: { ...base, facingMode: { ideal: 'environment' } } })
       }
-      const stream = await navigator.mediaDevices.getUserMedia({ video })
       streamRef.current = stream
       activeRef.current = true
       const track = stream.getVideoTracks()[0]
@@ -678,10 +700,18 @@ function Scanner({ onCode, onLabel, compact = false, autoStart = false, onClose 
         try { await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }) } catch { /* ignorieren */ }
       }
       setTorchOk(!!caps.torch)
+      if (caps.zoom && caps.zoom.max > caps.zoom.min) {
+        setZoomCaps({ min: caps.zoom.min, max: caps.zoom.max, step: caps.zoom.step || 0.1 })
+        setZoom(caps.zoom.min)
+      }
 
       try {
-        const all = await navigator.mediaDevices.enumerateDevices()
-        setDevices(all.filter(d => d.kind === 'videoinput'))
+        const all = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput')
+        const sorted = [...all.filter(d => !camIsFront(d)), ...all.filter(camIsFront)]
+        setDevices(sorted)
+        const cur = track.getSettings ? track.getSettings().deviceId : null
+        const idx = sorted.findIndex(d => d.deviceId === cur)
+        setDevIdx(idx >= 0 ? idx : 0)
       } catch { /* ignorieren */ }
 
       setScanning(true)
@@ -742,10 +772,18 @@ function Scanner({ onCode, onLabel, compact = false, autoStart = false, onClose 
     } catch { setInfo('Die Taschenlampe lässt sich auf diesem Gerät nicht schalten.') }
   }
 
+  async function changeZoom(v) {
+    setZoom(v)
+    const t = trackRef.current
+    if (!t) return
+    try { await t.applyConstraints({ advanced: [{ zoom: v }] }) } catch { /* nicht unterstützt */ }
+  }
+
   function nextCamera() {
     if (devices.length < 2) return
     const idx = (devIdx + 1) % devices.length
     setDevIdx(idx)
+    lsSet('cam_id', devices[idx].deviceId)
     start(devices[idx].deviceId)
   }
 
@@ -771,6 +809,14 @@ function Scanner({ onCode, onLabel, compact = false, autoStart = false, onClose 
     )
   }
 
+  const camName = devices.length > 1 ? `Kamera ${devIdx + 1} von ${devices.length}${devices[devIdx] && camIsFront(devices[devIdx]) ? ' (vorne)' : ' (hinten)'}` : ''
+  const zoomBox = scanning && zoomCaps && (
+    <label className="zoom-row">Zoom
+      <input type="range" min={zoomCaps.min} max={zoomCaps.max} step={zoomCaps.step} value={zoom} onChange={e => changeZoom(Number(e.target.value))} />
+    </label>
+  )
+  const photoInput = <input ref={photoRef} type="file" accept="image/*" capture="environment" hidden onChange={barcodePhoto} />
+
   const manualBox = (
     <div className="inline-add manual">
       <input inputMode="numeric" placeholder="Code manuell eingeben (8, 12 oder 13 Ziffern)" value={manual} onChange={e => setManual(e.target.value)} />
@@ -782,7 +828,11 @@ function Scanner({ onCode, onLabel, compact = false, autoStart = false, onClose 
     return (
       <div className="scanner-box compact">
         <video ref={videoRef} playsInline muted onClick={tapFocus} style={{ display: scanning ? 'block' : 'none' }} />
-        {!scanning && <button className="scan-btn" onClick={() => start()} disabled={busy}>Kamera starten</button>}
+        {!scanning && <button className="scan-btn label-btn" onClick={() => photoRef.current?.click()} disabled={busy}>Barcode fotografieren</button>}
+        {!scanning && <button className="scan-btn secondary label-btn" onClick={() => start()} disabled={busy}>Live-Scanner starten</button>}
+        {photoInput}
+        {scanning && camName && <div className="cam-name">{camName}</div>}
+        {zoomBox}
         <div className="scan-tools">
           {scanning && torchOk && <button onClick={toggleTorch}>{torchOn ? 'Licht aus' : 'Licht an'}</button>}
           {scanning && devices.length > 1 && <button onClick={nextCamera}>Kamera wechseln</button>}
@@ -798,10 +848,14 @@ function Scanner({ onCode, onLabel, compact = false, autoStart = false, onClose 
   return (
     <div className="scanner-box">
       <h3>Barcode Scanner</h3>
-      <p>Kamera auf den Barcode der Flasche richten, etwa 20–30 cm Abstand. Zum Scharfstellen auf das Bild tippen. Ohne Barcode: das Etikett fotografieren, die KI liest die Daten ab.</p>
-      {!scanning && <button className="scan-btn" onClick={() => start()} disabled={busy}>Kamera starten</button>}
+      <p>Am zuverlässigsten: den Strichcode mit der Kamera-App fotografieren, die App liest ihn aus dem Foto. Alternativ den Live-Scanner nutzen. Ohne Barcode: das Etikett fotografieren, die KI liest die Daten ab.</p>
+      {!scanning && <button className="scan-btn" onClick={() => photoRef.current?.click()} disabled={busy}>Barcode fotografieren</button>}
+      {!scanning && <button className="scan-btn secondary label-btn" onClick={() => start()} disabled={busy}>Live-Scanner starten</button>}
       {!scanning && <button className="scan-btn secondary label-btn" onClick={() => setLabelOpen(true)} disabled={busy}>Etikett fotografieren (KI)</button>}
+      {photoInput}
       <video ref={videoRef} playsInline muted onClick={tapFocus} style={{ display: scanning ? 'block' : 'none' }} />
+      {scanning && camName && <div className="cam-name">{camName}</div>}
+      {zoomBox}
       {scanning && (
         <div className="scan-tools">
           {torchOk && <button onClick={toggleTorch}>{torchOn ? 'Licht aus' : 'Licht an'}</button>}
@@ -935,6 +989,8 @@ function initialForm(bottle, prefill, cats, series = { roomId: '', locId: '' }) 
     is_sample: edit ? bottle.is_sample : false,
     is_purchase: false,
     min_stock: src.min_stock === null || src.min_stock === undefined ? '' : String(src.min_stock),
+    reorder: edit ? !!bottle.reorder : false,
+    last_price: edit && bottle.last_price !== null && bottle.last_price !== undefined ? String(bottle.last_price) : '',
     barcode: src.barcode || '',
     notes: edit ? (bottle.notes || '') : (src.noteText || ''),
   }
@@ -1186,6 +1242,8 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
         barcode: f.barcode.trim() || null,
         notes: f.notes.trim() || null,
         min_stock: f.min_stock === '' ? null : parseInt(f.min_stock, 10),
+        reorder: !!f.reorder,
+        last_price: f.last_price === '' || Number.isNaN(parseFloat(String(f.last_price).replace(',', '.'))) ? null : parseFloat(String(f.last_price).replace(',', '.')),
       }
 
       if (edit) {
@@ -1292,7 +1350,7 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
         <button type="button" className="scan-btn secondary" style={{ width: '100%', marginTop: 0 }} onClick={() => setScanOpen(true)}>Barcode scannen</button>
       )}
       {!edit && scanOpen && (
-        <Scanner compact autoStart onCode={onScanCode} onClose={() => setScanOpen(false)} />
+        <Scanner compact onCode={onScanCode} onClose={() => setScanOpen(false)} />
       )}
       {edit && (
         <div className="edit-head">
@@ -1391,8 +1449,10 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
 
       <input placeholder="Barcode (optional)" inputMode="numeric" value={f.barcode} onChange={e => set('barcode', e.target.value)} />
       <input placeholder="Mindestbestand (optional)" type="number" min="0" value={f.min_stock} onChange={e => set('min_stock', e.target.value)} />
+      <input placeholder="Letzter Einkaufspreis in € (optional)" inputMode="decimal" value={f.last_price} onChange={e => set('last_price', e.target.value)} />
       <input placeholder="Notizen (optional)" value={f.notes} onChange={e => set('notes', e.target.value)} />
 
+      <label className="check"><input type="checkbox" checked={f.reorder} onChange={e => set('reorder', e.target.checked)} /> Zum Nachkaufen vormerken</label>
       <label className="check"><input type="checkbox" checked={f.is_collection} onChange={e => set('is_collection', e.target.checked)} /> Gehört zur Sammlung</label>
       <label className="check"><input type="checkbox" checked={f.is_sample} onChange={e => set('is_sample', e.target.checked)} /> Gratis-Muster (Sample)</label>
       {!edit && <label className="check"><input type="checkbox" checked={f.is_purchase} onChange={e => set('is_purchase', e.target.checked)} /> Neu gekauft (Wareneingang)</label>}
