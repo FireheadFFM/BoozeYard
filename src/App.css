@@ -121,3 +121,16 @@ video { width: 100%; border-radius: 8px; margin-top: 14px; border: 1px solid #3a
 .ai-btn:hover { background: #c8891a; color: #0f0a06; }
 .ai-btn:disabled { opacity: 0.6; cursor: default; }
 .hint { font-size: 11px; color: #8a7050; line-height: 1.4; margin-top: -4px; }
+
+.actions button.del { border-color: #7a3020; color: #f0a090; }
+.actions button.del:hover { background: #7a3020; color: #fff; }
+.actions button.danger { border-color: #7a3020; background: #7a3020; color: #fff; }
+.actions button.danger:hover { background: #a03a28; color: #fff; }
+.del-confirm { margin-top: 8px; background: #2a1210; border: 1px solid #7a3020; border-radius: 8px; padding: 10px 12px; }
+.del-confirm p { font-size: 12px; color: #f0a090; line-height: 1.4; margin: 0; }
+
+.img-btns { display: flex; gap: 6px; }
+.img-btns button { padding: 5px 8px; border-radius: 6px; border: 1px solid #c8891a; background: transparent; color: #f0c96a; font-family: inherit; font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; cursor: pointer; }
+.img-btns button.ghost { border-color: #4a3018; color: #c8a96a; }
+.scanner-box .scan-btn.label-btn { display: block; width: 100%; margin-top: 12px; }
+.scanner-box .gallery-link { background: none; border: none; color: #c8a96a; font-family: inherit; font-size: 11px; text-decoration: underline; cursor: pointer; margin-top: 8px; }

@@ -176,6 +176,24 @@ function Main({ userId, onLogout }) {
     setTab('add')
   }
 
+  // Etikett-Foto aus dem Scanner-Tab: direkt KI, dann Formular vorbefüllt
+  async function handleLabel(file) {
+    try {
+      const r = await runAnalyze([file], cats, lookups)
+      const { data, filled } = aiToPrefill(r, cats, lookups)
+      data.frontFile = file
+      data.note = filled.length > 0
+        ? `Aus dem Etikett-Foto übernommen: ${filled.join(', ')}. Bitte alles prüfen und Anzahl und Ort ergänzen.`
+        : 'Auf dem Foto konnte nichts sicher erkannt werden. Bitte von Hand ausfüllen.'
+      setPrefill(p => ({ key: p.key + 1, data }))
+      setEditId(null)
+      setTab('add')
+      return ''
+    } catch (e) {
+      return 'Auswertung fehlgeschlagen: ' + e.message
+    }
+  }
+
   const tabs = [
     ['bottles', 'Bestand'],
     ['rooms', 'Lagerorte'],
@@ -205,7 +223,7 @@ function Main({ userId, onLogout }) {
         {!loading && tab === 'rooms' && (
           <Rooms bottles={bottles} rooms={rooms} locations={locations} reload={loadAll} />
         )}
-        {tab === 'scanner' && <Scanner onCode={handleCode} />}
+        {tab === 'scanner' && <Scanner onCode={handleCode} onLabel={handleLabel} />}
         {!loading && tab === 'add' && (
           <BottleForm key={prefill.key} userId={userId} prefill={prefill.data} cats={cats} rooms={rooms}
             locations={locations} lookups={lookups} reload={loadAll} />
@@ -224,6 +242,7 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit })
   const [roomId, setRoomId] = useState('')
   const [locId, setLocId] = useState('')
   const [msg, setMsg] = useState('')
+  const [delId, setDelId] = useState(null)
 
   const catById = useMemo(() => Object.fromEntries(cats.map(c => [c.id, c])), [cats])
   const roomById = useMemo(() => Object.fromEntries(rooms.map(r => [r.id, r])), [rooms])
@@ -318,6 +337,27 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit })
     reload()
   }
 
+  // Ganzen Eintrag löschen (mit Bildern)
+  async function deleteEntry(b) {
+    setMsg('')
+    const paths = [b.image_front, b.image_back, b.image_side, b.image_thumb].filter(Boolean)
+    if (paths.length > 0) await supabase.storage.from(BUCKET).remove(paths)
+    const { error } = await supabase.from('bottles').delete().eq('id', b.id)
+    if (error) return fail(error)
+    setDelId(null)
+    reload()
+  }
+
+  // Nur eine Flasche aus einem Stapel (×N) entfernen
+  async function deleteOne(b) {
+    setMsg('')
+    const { error } = await supabase.from('bottles').update({ quantity: b.quantity - 1 }).eq('id', b.id)
+    if (error) return fail(error)
+    await supabase.from('movements').insert({ bottle_id: b.id, type: 'adjustment', quantity: -1, notes: 'Gelöscht (1 Flasche)' })
+    setDelId(null)
+    reload()
+  }
+
   async function setFill(b, value) {
     const { error } = await supabase.from('bottles').update({ fill_percent: Number(value) }).eq('id', b.id)
     if (error) return fail(error)
@@ -391,13 +431,26 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit })
                 {b.is_sample && <span className="tag">Sample</span>}
                 {b.min_stock !== null && b.status === 'closed' && b.quantity < b.min_stock && <span className="tag warn">Nachkaufen</span>}
               </div>
-              <div className="actions">
-                {b.status === 'closed' && <button onClick={() => openOne(b)}>Öffnen</button>}
-                {b.status === 'open' && <button onClick={() => markEmpty(b)}>Leer</button>}
-                {b.status === 'open' && <button className="ghost" onClick={() => undoOpen(b)}>Rückgängig</button>}
-                {b.status === 'empty' && <button className="ghost" onClick={() => undoEmpty(b)}>Rückgängig</button>}
-                <button className="ghost" onClick={() => onEdit(b.id)}>Bearbeiten</button>
-              </div>
+              {delId !== b.id && (
+                <div className="actions">
+                  {b.status === 'closed' && <button onClick={() => openOne(b)}>Öffnen</button>}
+                  {b.status === 'open' && <button onClick={() => markEmpty(b)}>Leer</button>}
+                  {b.status === 'open' && <button className="ghost" onClick={() => undoOpen(b)}>Rückgängig</button>}
+                  {b.status === 'empty' && <button className="ghost" onClick={() => undoEmpty(b)}>Rückgängig</button>}
+                  <button className="ghost" onClick={() => onEdit(b.id)}>Bearbeiten</button>
+                  <button className="ghost del" onClick={() => setDelId(b.id)}>Löschen</button>
+                </div>
+              )}
+              {delId === b.id && (
+                <div className="del-confirm">
+                  <p>{b.quantity > 1 ? `Dieser Eintrag hat ${b.quantity} Flaschen. Was soll gelöscht werden?` : 'Wirklich löschen? Die Flasche und ihre Bilder werden endgültig entfernt.'}</p>
+                  <div className="actions">
+                    {b.quantity > 1 && <button className="danger" onClick={() => deleteOne(b)}>1 Flasche</button>}
+                    <button className="danger" onClick={() => deleteEntry(b)}>{b.quantity > 1 ? `Alle ${b.quantity}` : 'Ja, löschen'}</button>
+                    <button className="ghost" onClick={() => setDelId(null)}>Abbrechen</button>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )
@@ -488,8 +541,10 @@ async function createDetector(preferWasm) {
   return { detector: new BarcodeDetector({ formats: FORMATS }), wasm: true }
 }
 
-function Scanner({ onCode }) {
+function Scanner({ onCode, onLabel }) {
   const videoRef = useRef(null)
+  const labelCamRef = useRef(null)
+  const labelGalRef = useRef(null)
   const streamRef = useRef(null)
   const trackRef = useRef(null)
   const activeRef = useRef(false)
@@ -520,6 +575,19 @@ function Scanner({ onCode }) {
     setBusy(true)
     setInfo(`Code ${code} erkannt – suche Produktdaten…`)
     await onCode(code)
+    setBusy(false)
+  }
+
+  // Etikett fotografieren: Foto direkt an die KI, danach Formular
+  async function labelPhoto(e) {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+    stop()
+    setBusy(true)
+    setInfo('Etikett wird ausgewertet… das dauert einige Sekunden.')
+    const err = await onLabel(file)
+    if (err) setInfo(err)
     setBusy(false)
   }
 
@@ -624,8 +692,16 @@ function Scanner({ onCode }) {
   return (
     <div className="scanner-box">
       <h3>Barcode Scanner</h3>
-      <p>Kamera auf den Barcode der Flasche richten, etwa 20–30 cm Abstand. Zum Scharfstellen auf das Bild tippen.</p>
+      <p>Kamera auf den Barcode der Flasche richten, etwa 20–30 cm Abstand. Zum Scharfstellen auf das Bild tippen. Ohne Barcode: das Etikett fotografieren, die KI liest die Daten ab.</p>
       {!scanning && <button className="scan-btn" onClick={() => start()} disabled={busy}>Kamera starten</button>}
+      {!scanning && (
+        <>
+          <button className="scan-btn secondary label-btn" onClick={() => labelCamRef.current?.click()} disabled={busy}>Etikett fotografieren (KI)</button>
+          <button type="button" className="gallery-link" onClick={() => labelGalRef.current?.click()} disabled={busy}>oder Etikett-Foto aus der Galerie wählen</button>
+          <input ref={labelCamRef} type="file" accept="image/*" capture="environment" hidden onChange={labelPhoto} />
+          <input ref={labelGalRef} type="file" accept="image/*" hidden onChange={labelPhoto} />
+        </>
+      )}
       <video ref={videoRef} playsInline muted onClick={tapFocus} style={{ display: scanning ? 'block' : 'none' }} />
       {scanning && (
         <div className="scan-tools">
@@ -642,6 +718,66 @@ function Scanner({ onCode }) {
       {info && <div className="msg">{info}</div>}
     </div>
   )
+}
+
+/* ---------- KI-Auswertung (gemeinsam für Formular und Scanner-Tab) ---------- */
+
+const sameText = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase()
+
+async function runAnalyze(files, cats, lookups) {
+  const mains = cats.filter(c => !c.parent_id)
+  const images = []
+  for (const file of files) {
+    const blob = await resizeImage(file, 1200, 0.8)
+    images.push({ media_type: 'image/jpeg', data: await blobToBase64(blob) })
+  }
+  const taxonomy = {
+    categories: Object.fromEntries(mains.map(c => [c.name, cats.filter(x => x.parent_id === c.id).map(x => x.name)])),
+    countries: lookups.filter(l => l.kind === 'country').map(l => l.name),
+    regions: [...new Set(lookups.filter(l => l.kind === 'region').map(l => l.name))],
+  }
+  const { data, error: fnError } = await supabase.functions.invoke('analyze-label', { body: { images, taxonomy } })
+  if (fnError) {
+    let detail = fnError.message
+    try { const j = await fnError.context.json(); if (j?.error) detail = j.error } catch { /* ignorieren */ }
+    throw new Error(detail)
+  }
+  if (data?.error) throw new Error(data.error)
+  if (!data?.result) throw new Error('Keine Antwort erhalten')
+  return data.result
+}
+
+// KI-Ergebnis in Vorbelegungs-Daten für das Formular umwandeln
+function aiToPrefill(r, cats, lookups) {
+  const mains = cats.filter(c => !c.parent_id)
+  const data = {}
+  const filled = []
+  if (r.brand) { data.brand = r.brand; filled.push('Marke') }
+  if (r.name) { data.name = r.name; filled.push('Name') }
+  const m = r.main_category ? mains.find(c => sameText(c.name, r.main_category)) : null
+  if (m) {
+    const sub = r.sub_category ? cats.find(c => c.parent_id === m.id && sameText(c.name, r.sub_category)) : null
+    data.category_id = sub ? sub.id : m.id
+    filled.push(sub ? 'Kategorie und Subkategorie' : 'Kategorie')
+  }
+  if (r.abv !== null && r.abv !== undefined) { data.abv = r.abv; filled.push('Alkoholgehalt') }
+  if (r.size_ml) { data.size_ml = r.size_ml; filled.push('Größe') }
+  if (r.vintage) { data.vintage = r.vintage; filled.push('Jahrgang') }
+  let country = ''
+  if (r.country) {
+    const known = lookups.find(l => l.kind === 'country' && sameText(l.name, r.country))
+    if (known) { data.country = known.name; country = known.name }
+    else { data.country = '__new'; data.newCountry = r.country; country = r.country }
+    filled.push('Herkunftsland')
+  }
+  if (r.region) {
+    const known = lookups.find(l => l.kind === 'region' && sameText(l.name, r.region) && (!l.country || !country || l.country === country))
+    if (known) data.region = known.name
+    else { data.region = '__new'; data.newRegion = r.region }
+    filled.push('Region / Stil')
+  }
+  if (r.notes) data.noteText = r.notes
+  return { data, filled }
 }
 
 /* ---------- Formular: Flasche anlegen oder bearbeiten ---------- */
@@ -692,7 +828,7 @@ function initialForm(bottle, prefill, cats) {
     vintage: src.vintage || '',
     country: src.country || '',
     region: src.region || '',
-    newCountry: '', newRegion: '',
+    newCountry: src.newCountry || '', newRegion: src.newRegion || '',
     status: edit ? bottle.status : 'closed',
     quantity: edit ? bottle.quantity : 1,
     fill_percent: edit ? bottle.fill_percent : 100,
@@ -704,23 +840,29 @@ function initialForm(bottle, prefill, cats) {
     is_purchase: false,
     min_stock: src.min_stock === null || src.min_stock === undefined ? '' : String(src.min_stock),
     barcode: src.barcode || '',
-    notes: edit ? (bottle.notes || '') : '',
+    notes: edit ? (bottle.notes || '') : (src.noteText || ''),
   }
 }
 
 const SLOTS = [['front', 'Vorderseite'], ['back', 'Rückseite'], ['side', 'Seite (Füllstand)']]
 
 function ImageSlot({ label, url, onPick, onRemove }) {
-  const inputRef = useRef(null)
+  const camRef = useRef(null)
+  const galRef = useRef(null)
+  const take = e => { const f = e.target.files?.[0]; if (f) onPick(f); e.target.value = '' }
   return (
     <div className="img-slot">
-      <div className="img-box" onClick={() => inputRef.current?.click()}>
+      <div className="img-box" onClick={() => camRef.current?.click()}>
         {url ? <img src={url} alt={label} /> : <span>+ Foto</span>}
       </div>
       <div className="img-label">{label}</div>
+      <div className="img-btns">
+        <button type="button" onClick={() => camRef.current?.click()}>Kamera</button>
+        <button type="button" className="ghost" onClick={() => galRef.current?.click()}>Galerie</button>
+      </div>
       {url && <button type="button" className="link-danger" onClick={onRemove}>Entfernen</button>}
-      <input ref={inputRef} type="file" accept="image/*" hidden
-        onChange={e => { const f = e.target.files?.[0]; if (f) onPick(f); e.target.value = '' }} />
+      <input ref={camRef} type="file" accept="image/*" capture="environment" hidden onChange={take} />
+      <input ref={galRef} type="file" accept="image/*" hidden onChange={take} />
     </div>
   )
 }
@@ -738,7 +880,7 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
 
   // Bilder: pro Platz entweder vorhandener Pfad, neue Datei oder entfernt
   const [imgs, setImgs] = useState(() => ({
-    front: { path: bottle?.image_front || null, file: null, preview: null, removed: false },
+    front: { path: bottle?.image_front || null, file: prefill?.frontFile || null, preview: prefill?.frontFile ? URL.createObjectURL(prefill.frontFile) : null, removed: false },
     back: { path: bottle?.image_back || null, file: null, preview: null, removed: false },
     side: { path: bottle?.image_side || null, file: null, preview: null, removed: false },
   }))
@@ -881,24 +1023,8 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
     if (files.length === 0) return setError('Bitte zuerst mindestens ein Foto auswählen.')
     setAnalyzing(true)
     try {
-      const images = []
-      for (const file of files) {
-        const blob = await resizeImage(file, 1200, 0.8)
-        images.push({ media_type: 'image/jpeg', data: await blobToBase64(blob) })
-      }
-      const taxonomy = {
-        categories: Object.fromEntries(mains.map(c => [c.name, cats.filter(x => x.parent_id === c.id).map(x => x.name)])),
-        countries: lookups.filter(l => l.kind === 'country').map(l => l.name),
-        regions: [...new Set(lookups.filter(l => l.kind === 'region').map(l => l.name))],
-      }
-      const { data, error: fnError } = await supabase.functions.invoke('analyze-label', { body: { images, taxonomy } })
-      if (fnError) {
-        let detail = fnError.message
-        try { const j = await fnError.context.json(); if (j?.error) detail = j.error } catch { /* ignorieren */ }
-        throw new Error(detail)
-      }
-      if (data?.error) throw new Error(data.error)
-      applyAi(data?.result)
+      const result = await runAnalyze(files, cats, lookups)
+      applyAi(result)
     } catch (e) {
       setError('Auswertung fehlgeschlagen: ' + e.message)
     }
