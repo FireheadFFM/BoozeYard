@@ -3,7 +3,7 @@ import { supabase } from './supabase'
 import { lsGet, lsSet } from './utils'
 
 const SR = typeof window !== 'undefined' ? (window.SpeechRecognition || window.webkitSpeechRecognition) : null
-const HINTS = ['Wie viele trockenen Wermut habe ich noch?', 'Welchen Rye über 45 % habe ich da?', 'Habe ich noch Cynar offen?', 'Der Cynar ist leer.', 'Setz Rittenhouse Rye auf die Einkaufsliste.']
+const HINTS = ['Wie viele trockenen Wermut habe ich noch?', 'Welchen Rye über 45 % habe ich da?', 'Habe ich noch Cynar offen?', 'Der Cynar ist leer.', 'Setz Rittenhouse Rye auf die Einkaufsliste.', 'Was kann ich aus meinen Videos mixen?']
 
 const speakable = t => String(t || '').replace(/[*_`#>]/g, '').replace(/\s+/g, ' ').trim()
 
@@ -111,7 +111,7 @@ export default function Chat({ hidden, onOpenBottle, reload }) {
     setBusy(true)
     try {
       const d = await callFn({ messages: history(next) })
-      const reply = { id: Date.now() + 'a', role: 'assistant', text: d.reply || '', shown: d.shown || [], choices: d.choices || [], proposal: d.proposal || null }
+      const reply = { id: Date.now() + 'a', role: 'assistant', text: d.reply || '', shown: d.shown || [], recipes: d.recipes || [], choices: d.choices || [], proposal: d.proposal || null }
       setMsgs(m => [...m, reply])
       speak(d.reply)
     } catch (e) {
@@ -246,6 +246,17 @@ export default function Chat({ hidden, onOpenBottle, reload }) {
                     <b>{b.produkt}</b>
                     <small>{[b.ml && `${b.ml} ml`, b.abv && `${b.abv} %`, b.status + (b.anzahl > 1 ? ` ×${b.anzahl}` : '') + (b.fuellstand !== undefined ? ` ${b.fuellstand} %` : ''), b.ort].filter(Boolean).join(' · ')}</small>
                   </button>
+                ))}
+              </div>
+            )}
+
+            {m.recipes?.length > 0 && (
+              <div className="shown">
+                {m.recipes.map(r => (
+                  <a key={r.id} className="shown-item recipe-card" href={r.url} target="_blank" rel="noopener noreferrer">
+                    <b>{r.name}</b>
+                    <small>Rezept im Video öffnen</small>
+                  </a>
                 ))}
               </div>
             )}

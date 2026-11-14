@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { supabase } from './supabase'
 import { STATUS, lsGet, lsSet } from './utils'
 import { buildXlsx, readXlsx, parseCsv, csvFromRows } from './xlsx'
@@ -164,6 +164,59 @@ export function planImport(table, { bottles, cats, rooms, locations }) {
   return { plans, ignored, total: table.length - 1 }
 }
 
+async function callYt(body) {
+  const { data, error } = await supabase.functions.invoke('sync-youtube', { body })
+  if (error) {
+    let detail = error.message
+    try { const j = await error.context.json(); if (j?.error) detail = j.error } catch { /* ignorieren */ }
+    throw new Error(detail)
+  }
+  if (data?.error) throw new Error(data.error)
+  return data
+}
+
+function YoutubeRezepte() {
+  const [st, setSt] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [log, setLog] = useState('')
+  const [err, setErr] = useState('')
+
+  useEffect(() => { callYt({ action: 'status' }).then(setSt).catch(e => setErr(e.message)) }, [])
+
+  async function run() {
+    setBusy(true); setErr(''); setLog('Lädt Videos von YouTube…')
+    let lastErr = ''
+    try {
+      const s = await callYt({ action: 'sync' })
+      let open = s.offen
+      setLog(`${s.videos} Videos gefunden (${s.neu} neu, ${s.geaendert} geändert).${open > 0 ? ' Liest Rezepte aus…' : ''}`)
+      let guard = 0
+      while (open > 0 && guard < 100) {
+        const r = await callYt({ action: 'extract', limit: 8 })
+        if (r.fehler?.length) lastErr = r.fehler[0]
+        if (r.verarbeitet === 0) { setErr('Auswertung bricht ab: ' + (lastErr || 'unbekannter Fehler')); break }
+        open = r.offen
+        setLog(`Liest Rezepte aus… noch ${open} offen`)
+        guard++
+      }
+      if (open === 0) setLog('Fertig.' + (lastErr ? ' Einzelne Videos ließen sich nicht auswerten: ' + lastErr : ''))
+      setSt(await callYt({ action: 'status' }))
+    } catch (e) { setErr(e.message) }
+    setBusy(false)
+  }
+
+  return (
+    <>
+      <h3 style={{ marginTop: 28 }}>YouTube-Rezepte für den Assistenten</h3>
+      <p className="hint">Lädt alle Videos deines Kanals und liest die Zutaten aus den Beschreibungen. Danach kann der Assistent fragen wie „Was kann ich aus meinen Videos mixen?“ beantworten. Nach neuen Videos einfach erneut aktualisieren, bereits gelesene Videos werden nicht noch einmal ausgewertet.</p>
+      {st && <div className="count">{st.videos} Videos · {st.rezepte} Rezepte erkannt{st.offen > 0 ? ` · ${st.offen} noch nicht ausgewertet` : ''}</div>}
+      <button className="scan-btn secondary" onClick={run} disabled={busy}>{busy ? 'Läuft…' : (st && st.videos > 0 ? 'Rezepte aktualisieren' : 'Rezepte laden')}</button>
+      {log && <div className="msg">{log}</div>}
+      {err && <div className="msg error">{err}</div>}
+    </>
+  )
+}
+
 export default function Export({ bottles, cats, rooms, locations, reload }) {
   const data = { bottles, cats, rooms, locations }
   const baseUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/export-data`
@@ -283,6 +336,8 @@ export default function Export({ bottles, cats, rooms, locations, reload }) {
         <button className="scan-btn secondary" onClick={() => copy(mCode, 'm')}>{copied === 'm' ? 'Kopiert' : 'Power-Query-Code kopieren'}</button>
       </div>
       <p className="hint">In Excel: Daten → Daten abrufen → Aus anderen Quellen → Leere Abfrage → Erweiterter Editor → Code einfügen → Fertig → Schließen und laden. Danach unter Daten → Alle aktualisieren (oder beim Öffnen automatisch, in den Abfrageeigenschaften „Daten beim Öffnen der Datei aktualisieren“). Die Live-Daten sind schreibgeschützt, zum Ändern nutze die Excel-Datei oben.</p>
+
+      <YoutubeRezepte />
     </div>
   )
 }

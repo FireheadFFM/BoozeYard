@@ -23,13 +23,14 @@ const STATUS_DE: Record<string, string> = { closed: "geschlossen", open: "offen"
 /* ---------- Daten laden ---------- */
 
 async function loadData(db: any) {
-  const [b, r, l, c, w, n] = await Promise.all([
+  const [b, r, l, c, w, n, rc] = await Promise.all([
     db.from("bottles").select("*").limit(5000),
     db.from("rooms").select("id,name"),
     db.from("locations").select("id,name,room_id"),
     db.from("categories").select("id,name,parent_id"),
     db.from("wishlist").select("*"),
     db.from("chat_notes").select("id,text").order("created_at"),
+    db.from("recipes").select("id,video_id,title,cocktail,ingredients,published_at").eq("is_recipe", true).limit(3000),
   ]);
   if (b.error) throw new Error(b.error.message);
   const room = new Map((r.data ?? []).map((x: any) => [x.id, x.name]));
@@ -47,7 +48,7 @@ async function loadData(db: any) {
       last_price: x.last_price === null || x.last_price === undefined ? null : Number(x.last_price), notes: x.notes,
     };
   });
-  return { rows, wishlist: w.error ? [] : (w.data ?? []), notes: n.error ? [] : (n.data ?? []) };
+  return { rows, wishlist: w.error ? [] : (w.data ?? []), notes: n.error ? [] : (n.data ?? []), recipes: rc.error ? [] : (rc.data ?? []) };
 }
 
 const label = (r: any) => `${r.brand} ${r.name}${r.abv ? ` ${String(r.abv).replace(".", ",")} %` : ""}${r.size_ml ? ` ${r.size_ml} ml` : ""}`;
@@ -88,6 +89,28 @@ const TOOLS = [
   {
     name: "show_bottles",
     description: "Zeigt dem Benutzer antippbare Karten zu diesen Einträgen (IDs aus search_bottles). Nutze es, wenn der Benutzer eine Liste will oder mehrere Treffer sinnvoll sind. Maximal 12.",
+    input_schema: { type: "object", properties: { ids: { type: "array", items: { type: "string" } } }, required: ["ids"] },
+  },
+  {
+    name: "search_recipes",
+    description: "Sucht in den Cocktail-Rezepten aus den eigenen YouTube-Videos des Benutzers (Kanal Kultivierte Tresenwesen). query darf Cocktailname oder Zutaten enthalten (z. B. 'Purgatory' oder 'Chartreuse Rye'). Liefert Zutaten mit Mengen und den Video-Link.",
+    input_schema: { type: "object", properties: { query: { type: "string" }, limit: { type: "integer", description: "Maximal 10" } }, required: ["query"] },
+  },
+  {
+    name: "makeable_recipes",
+    description: "Prüft die Rezepte aus den YouTube-Videos gegen den Bestand (nicht leere Flaschen). Frische Zutaten (Säfte, Sirup, Eis) werden ignoriert. 'fehlt' = keine passende Flasche, 'unsicher' = vielleicht vorhanden, bitte mit search_bottles prüfen. Der Abgleich ist ungefähr.",
+    input_schema: {
+      type: "object",
+      properties: {
+        max_missing: { type: "integer", description: "Wie viele Flaschen-Zutaten dürfen fehlen oder unsicher sein (Standard 0)" },
+        must_include: { type: "string", description: "Optional: Zutat, die im Rezept vorkommen muss, z. B. 'Cynar'" },
+        limit: { type: "integer", description: "Maximal 25" },
+      },
+    },
+  },
+  {
+    name: "show_recipes",
+    description: "Zeigt dem Benutzer antippbare Karten mit Link zum Video (IDs aus search_recipes oder makeable_recipes). Maximal 6.",
     input_schema: { type: "object", properties: { ids: { type: "array", items: { type: "string" } } }, required: ["ids"] },
   },
   {
@@ -164,9 +187,85 @@ function searchBottles(rows: any[], a: any) {
   return { treffer: list.length, ungenau_gesucht: fuzzy || undefined, eintraege: list.slice(0, limit).map(brief) };
 }
 
+/* ---------- Rezepte ---------- */
+
+const STOP = new Set(["und", "der", "die", "das", "mit", "von", "of", "the", "and", "cl", "ml"]);
+const nsyn = (s: unknown) =>
+  norm(String(s ?? "").replace(/ß/g, "ss")).replace(/whiskey/g, "whisky").replace(/\b(gruner|grune|grunen|grun|green|verte)\b/g, "gruen")
+    .replace(/\b(gelber|gelbe|gelben|gelb|yellow|jaune)\b/g, "gelb");
+const toks = (s: unknown) => nsyn(s).split(" ").filter((t) => t.length > 1 && !STOP.has(t));
+const bottleHay = (r: any) => nsyn([r.brand, r.name, r.category, r.main_category, r.country, r.region, r.notes].join(" "));
+const recipeLink = (r: any) => `https://www.youtube.com/watch?v=${r.video_id}`;
+
+// "ja" | "unsicher" | "nein" für eine Zutat gegen den Bestand
+function covered(hays: string[], ing: any): "ja" | "unsicher" | "nein" {
+  let best = 0, need = 0;
+  for (const q of [ing.product, ing.type]) {
+    const t = toks(q);
+    if (t.length === 0) continue;
+    for (const h of hays) {
+      const n = t.filter((x) => h.includes(x)).length;
+      if (n === t.length) return "ja";
+      if (n / t.length > best) { best = n / t.length; need = t.length; }
+    }
+  }
+  return best >= 0.5 && need > 1 ? "unsicher" : "nein";
+}
+
+const zutat = (i: any) => `${i.amount_text ? i.amount_text + " " : ""}${i.type}${i.product && norm(i.product) !== norm(i.type) ? ` (${i.product})` : ""}`;
+
+function searchRecipes(recipes: any[], a: any) {
+  if (recipes.length === 0) return { hinweis: "Es sind noch keine Rezepte geladen. Der Benutzer kann sie im Tab Export unter YouTube-Rezepte laden." };
+  const t = toks(a.query);
+  const hit = recipes.filter((r) => {
+    const hay = nsyn([r.cocktail, r.title, ...(r.ingredients ?? []).map((i: any) => `${i.type} ${i.product ?? ""}`)].join(" "));
+    return t.every((x) => hay.includes(x));
+  });
+  const lim = Math.min(10, a.limit ?? 8);
+  return {
+    treffer: hit.length,
+    rezepte: hit.slice(0, lim).map((r) => ({ id: r.id, cocktail: r.cocktail, video: r.title, link: recipeLink(r), zutaten: (r.ingredients ?? []).map(zutat) })),
+  };
+}
+
+function makeableRecipes(recipes: any[], rows: any[], a: any) {
+  if (recipes.length === 0) return { hinweis: "Es sind noch keine Rezepte geladen. Der Benutzer kann sie im Tab Export unter YouTube-Rezepte laden." };
+  const hays = rows.filter((r) => r.status !== "empty").map(bottleHay);
+  const maxMiss = Math.max(0, Math.min(5, Math.round(Number(a.max_missing ?? 0))));
+  const must = a.must_include ? toks(a.must_include) : [];
+  const out: any[] = [];
+  for (const r of recipes) {
+    const ings = (r.ingredients ?? []).filter((i: any) => i.kind !== "fresh");
+    if (ings.length === 0) continue;
+    if (must.length) {
+      const hay = nsyn((r.ingredients ?? []).map((i: any) => `${i.type} ${i.product ?? ""}`).join(" "));
+      if (!must.every((x) => hay.includes(x))) continue;
+    }
+    const fehlt: string[] = [], unsicher: string[] = [];
+    for (const i of ings) {
+      const c = covered(hays, i);
+      if (c === "nein") fehlt.push(i.type);
+      else if (c === "unsicher") unsicher.push(i.type);
+    }
+    if (fehlt.length + unsicher.length <= maxMiss) out.push({ id: r.id, cocktail: r.cocktail, fehlt, unsicher, t: r.published_at ?? "" });
+  }
+  out.sort((x, y) => (x.fehlt.length + x.unsicher.length) - (y.fehlt.length + y.unsicher.length) || String(y.t).localeCompare(String(x.t)));
+  const lim = Math.min(25, a.limit ?? 20);
+  return {
+    treffer: out.length, geprueft: recipes.length,
+    rezepte: out.slice(0, lim).map(({ t, ...rest }) => ({ ...rest, fehlt: rest.fehlt.length ? rest.fehlt : undefined, unsicher: rest.unsicher.length ? rest.unsicher : undefined })),
+  };
+}
+
 async function runTool(db: any, data: any, name: string, a: any, ctx: any) {
   const { rows, wishlist } = data;
   switch (name) {
+    case "search_recipes": return searchRecipes(data.recipes, a ?? {});
+    case "makeable_recipes": return makeableRecipes(data.recipes, rows, a ?? {});
+    case "show_recipes": {
+      for (const id of (a.ids ?? []).slice(0, 6)) if (!ctx.recipes.includes(id)) ctx.recipes.push(id);
+      return { ok: true };
+    }
     case "search_bottles": return searchBottles(rows, a ?? {});
     case "stats": {
       const live = rows.filter((r: any) => r.status !== "empty");
@@ -348,7 +447,9 @@ Regeln:
 - Änderungen führst du nie selbst aus. Rufe propose_changes auf und erkläre in einem kurzen Satz, was du vorschlägst. Du behauptest nie, etwas sei schon geändert.
 - Für "setz X auf die Einkaufsliste": Suche X auch unter leeren Flaschen (status any). Gibt es eine passende Flasche, nutze set_reorder. Gibt es keine, nutze add_wishlist mit Marke und Name.
 - Bei Listen nutze show_bottles, damit der Benutzer die Einträge antippen kann, und nenne im Text nur die Anzahl und das Wichtigste.
-- Cocktailfragen beantwortest du aus deinem Allgemeinwissen und prüfst die Zutaten mit search_bottles gegen den Bestand. Weise kurz darauf hin, dass Rezepte aus deinem Wissen stammen.
+- Der Benutzer betreibt den YouTube-Kanal Kultivierte Tresenwesen. Fragt er nach seinen Rezepten, nach einem Cocktail aus seinen Videos oder was er mit seinem Bestand mixen kann, nutze search_recipes und makeable_recipes und stütze dich auf diese Rezepte. Nenne Cocktailnamen und bei Bedarf die Zutaten mit Mengen. Zeige passende Rezepte mit show_recipes als Karten mit Video-Link, höchstens 6.
+- Bei "was kann ich mixen" nutze makeable_recipes (max_missing 0, bei wenigen Treffern 1). Bei unsicher geführten Zutaten prüfe mit search_bottles nach. Sage ehrlich, dass der Abgleich ungefähr ist. Frische Zutaten (Säfte, Sirup, Eis) setzt du als vorhanden voraus.
+- Gibt es kein passendes Rezept aus den Videos, beantworte Cocktailfragen aus deinem Allgemeinwissen, prüfe die Zutaten mit search_bottles und weise kurz darauf hin, dass das Rezept nicht aus seinen Videos stammt.
 - Sagt der Benutzer "merk dir ..." oder nennt er eine dauerhafte Absprache (zum Beispiel einen Kurznamen für eine Flasche oder eine Vorliebe), schlage add_note vor. Sagt er "vergiss ...", nutze remove_note.
 - Außerhalb von Bar, Bestand und Getränken hilfst du nicht.${notes.length ? `
 Merkliste des Benutzers (feste Absprachen, beachte sie immer):
@@ -398,7 +499,9 @@ Deno.serve(async (req) => {
   try { data = await loadData(db); } catch (e) { return json({ error: "Bestand konnte nicht geladen werden: " + (e as Error).message }, 500); }
 
   const messages: any[] = history;
-  const ctx = { shown: [] as string[] };
+  const ctx = { shown: [] as string[], recipes: [] as string[] };
+  const cards = () => ctx.recipes.map((id) => data.recipes.find((r: any) => r.id === id)).filter(Boolean)
+    .map((r: any) => ({ id: r.id, name: r.cocktail, url: recipeLink(r) }));
 
   for (let round = 0; round < 8; round++) {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
@@ -421,16 +524,16 @@ Deno.serve(async (req) => {
       const shown = ctx.shown.map((id) => data.rows.find((r: any) => r.id === id)).filter(Boolean).map(brief);
       if (choice) {
         const opts = (choice.input?.options ?? []).filter((o: any) => data.rows.some((r: any) => r.id === o.bottle_id)).slice(0, 6);
-        return json({ reply: choice.input?.question || text, choices: opts, shown });
+        return json({ reply: choice.input?.question || text, choices: opts, shown, recipes: cards() });
       }
       const changes = (propose!.input?.changes ?? []).slice(0, 25);
       const items = changes.map((a: any) => ({ ...a, label: describe(a, data.rows, data.wishlist, data.notes) }));
-      return json({ reply: text || "Soll ich das so ändern?", proposal: { items }, shown });
+      return json({ reply: text || "Soll ich das so ändern?", proposal: { items }, shown, recipes: cards() });
     }
 
     if (payload.stop_reason !== "tool_use" || calls.length === 0) {
       const shown = ctx.shown.map((id) => data.rows.find((r: any) => r.id === id)).filter(Boolean).map(brief);
-      return json({ reply: text || "Dazu habe ich keine Antwort.", shown });
+      return json({ reply: text || "Dazu habe ich keine Antwort.", shown, recipes: cards() });
     }
 
     messages.push({ role: "assistant", content: blocks });

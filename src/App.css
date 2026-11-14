@@ -292,3 +292,4 @@ video { width: 100%; border-radius: 8px; margin-top: 14px; border: 1px solid #3a
 .note-row button, .note-add button { padding: 6px 10px; border-radius: 8px; border: 1px solid #4a3018; background: transparent; color: #c8a96a; font-family: inherit; font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; cursor: pointer; flex-shrink: 0; }
 .note-add { display: flex; gap: 8px; }
 .note-add input { flex: 1; min-width: 0; padding: 10px 12px; border-radius: 10px; border: 1px solid #3a2810; background: #1a0f05; color: #f0e6d3; font-family: inherit; font-size: 14px; outline: none; }
+a.shown-item { text-decoration: none; }
