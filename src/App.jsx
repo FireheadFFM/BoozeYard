@@ -32,6 +32,35 @@ const BottleIcon = () => (
   </svg>
 )
 
+const TrashIcon = () => (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M4 7h16" /><path d="M10 11v6" /><path d="M14 11v6" />
+    <path d="M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12" /><path d="M9 7V4h6v3" />
+  </svg>
+)
+
+// Großansicht: Bilder im Vollbild, bei mehreren seitlich wischen, Tippen schließt
+function Lightbox({ images, start = 0, onClose }) {
+  const ref = useRef(null)
+  useEffect(() => {
+    const el = ref.current
+    if (el) el.scrollLeft = el.clientWidth * start
+  }, [start])
+  return (
+    <div className="lightbox" onClick={onClose}>
+      <button type="button" className="lb-close" aria-label="Schließen" onClick={onClose}>×</button>
+      <div className="lb-track" ref={ref}>
+        {images.map((im, i) => (
+          <figure key={i} className="lb-item">
+            <img src={im.url} alt={im.label} />
+            <figcaption>{im.label}{images.length > 1 ? ` · ${i + 1}/${images.length}` : ''}</figcaption>
+          </figure>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function Shell({ children, onLogout }) {
   return (
     <div className="app">
@@ -97,6 +126,36 @@ function Login() {
 
 /* ---------- Hauptansicht ---------- */
 
+// Barcode auflösen: erst im eigenen Bestand suchen, dann in Open Food Facts
+async function resolveCode(raw, bottles, cats) {
+  const code = digitsOnly(raw)
+  if (!code) return null
+  const variants = codeVariants(code)
+  const warn = codeWarning(code)
+  const own = bottles.filter(b => b.barcode && variants.includes(digitsOnly(b.barcode)))
+  let data
+  if (own.length > 0) {
+    const b = own[0]
+    const total = own.filter(x => x.status !== 'empty').reduce((s, x) => s + x.quantity, 0)
+    data = {
+      barcode: code, brand: b.brand, name: b.name, category_id: b.category_id, abv: b.abv,
+      size_ml: b.size_ml, country: b.country, region: b.region, vintage: b.vintage,
+      is_collection: b.is_collection, min_stock: b.min_stock,
+      note: `Schon im Bestand (${total}×) – Daten übernommen. Bitte Anzahl und Ort prüfen.`,
+    }
+  } else {
+    const mains = cats.filter(c => !c.parent_id)
+    const found = await lookupBarcode(variants, mains)
+    if (found && found.got.length > 0) {
+      data = { barcode: code, ...found, note: `Aus Open Food Facts übernommen: ${found.got.join(', ')}. Bitte prüfen und ergänzen.` }
+    } else {
+      data = { barcode: code, note: 'Barcode übernommen – keine Produktdaten gefunden. Bitte von Hand ausfüllen oder das Etikett fotografieren.' }
+    }
+  }
+  if (warn) data.note = `${data.note} ${warn}`
+  return data
+}
+
 function Main({ userId, onLogout }) {
   const [tab, setTab] = useState('bottles')
   const [loading, setLoading] = useState(true)
@@ -109,6 +168,7 @@ function Main({ userId, onLogout }) {
   const [thumbs, setThumbs] = useState({})
   const [prefill, setPrefill] = useState({ key: 0, data: null })
   const [editId, setEditId] = useState(null)
+  const [series, setSeries] = useState({ roomId: '', locId: '' })
 
   async function loadThumbs(rows) {
     const paths = rows.map(b => b.image_thumb).filter(Boolean)
@@ -144,46 +204,24 @@ function Main({ userId, onLogout }) {
 
   useEffect(() => { loadAll() }, [])
 
-  // Barcode erkannt: erst im eigenen Bestand suchen, dann in Open Food Facts
+  // Barcode erkannt (Scanner-Tab): Daten suchen, dann Formular vorbefüllen
   async function handleCode(raw) {
-    const code = digitsOnly(raw)
-    if (!code) return
-    const variants = codeVariants(code)
-    const warn = codeWarning(code)
-    const own = bottles.filter(b => b.barcode && variants.includes(digitsOnly(b.barcode)))
-    let data
-    if (own.length > 0) {
-      const b = own[0]
-      const total = own.filter(x => x.status !== 'empty').reduce((s, x) => s + x.quantity, 0)
-      data = {
-        barcode: code, brand: b.brand, name: b.name, category_id: b.category_id, abv: b.abv,
-        size_ml: b.size_ml, country: b.country, region: b.region, vintage: b.vintage,
-        is_collection: b.is_collection, min_stock: b.min_stock,
-        note: `Schon im Bestand (${total}×) – Daten übernommen. Bitte Anzahl und Ort prüfen.`,
-      }
-    } else {
-      const mains = cats.filter(c => !c.parent_id)
-      const found = await lookupBarcode(variants, mains)
-      if (found && found.got.length > 0) {
-        data = { barcode: code, ...found, note: `Aus Open Food Facts übernommen: ${found.got.join(', ')}. Bitte prüfen und ergänzen.` }
-      } else {
-        data = { barcode: code, note: 'Barcode übernommen – keine Produktdaten gefunden. Bitte von Hand ausfüllen.' }
-      }
-    }
-    if (warn) data.note = `${data.note} ${warn}`
+    const data = await resolveCode(raw, bottles, cats)
+    if (!data) return
     setPrefill(p => ({ key: p.key + 1, data }))
     setEditId(null)
     setTab('add')
   }
 
   // Etikett-Foto aus dem Scanner-Tab: direkt KI, dann Formular vorbefüllt
-  async function handleLabel(file) {
+  async function handleLabel({ front, back }) {
     try {
-      const r = await runAnalyze([file], cats, lookups)
+      const r = await runAnalyze([front, back].filter(Boolean), cats, lookups)
       const { data, filled } = aiToPrefill(r, cats, lookups)
-      data.frontFile = file
+      data.frontFile = front
+      data.backFile = back || null
       data.note = filled.length > 0
-        ? `Aus dem Etikett-Foto übernommen: ${filled.join(', ')}. Bitte alles prüfen und Anzahl und Ort ergänzen.`
+        ? `Aus dem Etikett-${back ? 'Fotos' : 'Foto'} übernommen: ${filled.join(', ')}. Bitte alles prüfen und Anzahl und Ort ergänzen.`
         : 'Auf dem Foto konnte nichts sicher erkannt werden. Bitte von Hand ausfüllen.'
       setPrefill(p => ({ key: p.key + 1, data }))
       setEditId(null)
@@ -206,7 +244,7 @@ function Main({ userId, onLogout }) {
     <Shell onLogout={onLogout}>
       <nav>
         {tabs.map(([id, label]) => (
-          <button key={id} onClick={() => { setTab(id); setEditId(null) }} className={tab === id ? 'active' : ''}>{label}</button>
+          <button key={id} onClick={() => { setTab(id); setEditId(null); if (id === 'bottles' || id === 'rooms') setSeries({ roomId: '', locId: '' }) }} className={tab === id ? 'active' : ''}>{label}</button>
         ))}
       </nav>
       <main>
@@ -218,7 +256,7 @@ function Main({ userId, onLogout }) {
         )}
         {!loading && tab === 'bottles' && editing && (
           <BottleForm key={editing.id} userId={userId} bottle={editing} cats={cats} rooms={rooms}
-            locations={locations} lookups={lookups} reload={loadAll} onDone={() => setEditId(null)} />
+            locations={locations} lookups={lookups} bottles={bottles} reload={loadAll} onDone={() => setEditId(null)} />
         )}
         {!loading && tab === 'rooms' && (
           <Rooms bottles={bottles} rooms={rooms} locations={locations} reload={loadAll} />
@@ -226,7 +264,9 @@ function Main({ userId, onLogout }) {
         {tab === 'scanner' && <Scanner onCode={handleCode} onLabel={handleLabel} />}
         {!loading && tab === 'add' && (
           <BottleForm key={prefill.key} userId={userId} prefill={prefill.data} cats={cats} rooms={rooms}
-            locations={locations} lookups={lookups} reload={loadAll} />
+            locations={locations} lookups={lookups} bottles={bottles} reload={loadAll}
+            series={series} onSeries={(roomId, locId) => setSeries({ roomId, locId })}
+            onFinish={() => { setSeries({ roomId: '', locId: '' }); setTab('bottles') }} />
         )}
       </main>
     </Shell>
@@ -243,6 +283,7 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit })
   const [locId, setLocId] = useState('')
   const [msg, setMsg] = useState('')
   const [delId, setDelId] = useState(null)
+  const [gallery, setGallery] = useState(null)
 
   const catById = useMemo(() => Object.fromEntries(cats.map(c => [c.id, c])), [cats])
   const roomById = useMemo(() => Object.fromEntries(rooms.map(r => [r.id, r])), [rooms])
@@ -337,6 +378,18 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit })
     reload()
   }
 
+  // Alle Fotos einer Flasche groß anzeigen
+  async function openGallery(b) {
+    const slots = [[b.image_front, 'Vorderseite'], [b.image_back, 'Rückseite'], [b.image_side, 'Seite']].filter(x => x[0])
+    if (slots.length === 0) return
+    const { data, error } = await supabase.storage.from(BUCKET).createSignedUrls(slots.map(x => x[0]), 3600)
+    if (error) return fail(error)
+    const map = {}
+    ;(data || []).forEach(x => { if (x.signedUrl) map[x.path] = x.signedUrl })
+    const images = slots.filter(x => map[x[0]]).map(x => ({ url: map[x[0]], label: x[1] }))
+    if (images.length > 0) setGallery({ images })
+  }
+
   // Ganzen Eintrag löschen (mit Bildern)
   async function deleteEntry(b) {
     setMsg('')
@@ -392,6 +445,7 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit })
       </div>
 
       {msg && <div className="msg error">{msg}</div>}
+      {gallery && <Lightbox images={gallery.images} onClose={() => setGallery(null)} />}
 
       {filtered.length === 0 && (
         <div className="empty">{bottles.length === 0 ? 'Noch keine Flaschen eingetragen.' : 'Keine Treffer für diese Filter.'}</div>
@@ -405,7 +459,7 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit })
         const thumb = b.image_thumb ? thumbs[b.image_thumb] : null
         return (
           <div key={b.id} className={'card' + (b.status === 'empty' ? ' dim' : '')}>
-            <div className={'card-icon' + (thumb ? ' has-thumb' : '')}>
+            <div className={'card-icon' + (thumb ? ' has-thumb zoomable' : '')} onClick={thumb ? () => openGallery(b) : undefined}>
               {thumb ? <img className="thumb" src={thumb} alt="" loading="lazy" /> : <BottleIcon />}
             </div>
             <div className="card-info">
@@ -431,27 +485,27 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit })
                 {b.is_sample && <span className="tag">Sample</span>}
                 {b.min_stock !== null && b.status === 'closed' && b.quantity < b.min_stock && <span className="tag warn">Nachkaufen</span>}
               </div>
-              {delId !== b.id && (
-                <div className="actions">
-                  {b.status === 'closed' && <button onClick={() => openOne(b)}>Öffnen</button>}
-                  {b.status === 'open' && <button onClick={() => markEmpty(b)}>Leer</button>}
-                  {b.status === 'open' && <button className="ghost" onClick={() => undoOpen(b)}>Rückgängig</button>}
-                  {b.status === 'empty' && <button className="ghost" onClick={() => undoEmpty(b)}>Rückgängig</button>}
-                  <button className="ghost" onClick={() => onEdit(b.id)}>Bearbeiten</button>
-                  <button className="ghost del" onClick={() => setDelId(b.id)}>Löschen</button>
-                </div>
-              )}
-              {delId === b.id && (
-                <div className="del-confirm">
-                  <p>{b.quantity > 1 ? `Dieser Eintrag hat ${b.quantity} Flaschen. Was soll gelöscht werden?` : 'Wirklich löschen? Die Flasche und ihre Bilder werden endgültig entfernt.'}</p>
-                  <div className="actions">
-                    {b.quantity > 1 && <button className="danger" onClick={() => deleteOne(b)}>1 Flasche</button>}
-                    <button className="danger" onClick={() => deleteEntry(b)}>{b.quantity > 1 ? `Alle ${b.quantity}` : 'Ja, löschen'}</button>
-                    <button className="ghost" onClick={() => setDelId(null)}>Abbrechen</button>
-                  </div>
-                </div>
-              )}
             </div>
+            {delId !== b.id && (
+              <div className="actions full">
+                {b.status === 'closed' && <button onClick={() => openOne(b)}>Öffnen</button>}
+                {b.status === 'open' && <button onClick={() => markEmpty(b)}>Leer</button>}
+                {b.status === 'open' && <button className="ghost" onClick={() => undoOpen(b)}>Zurück</button>}
+                {b.status === 'empty' && <button className="ghost" onClick={() => undoEmpty(b)}>Zurück</button>}
+                <button className="ghost" onClick={() => onEdit(b.id)}>Bearbeiten</button>
+                <button className="ghost del icon" aria-label="Löschen" title="Löschen" onClick={() => setDelId(b.id)}><TrashIcon /></button>
+              </div>
+            )}
+            {delId === b.id && (
+              <div className="del-confirm full">
+                <p>{b.quantity > 1 ? `Dieser Eintrag hat ${b.quantity} Flaschen. Was soll gelöscht werden?` : 'Wirklich löschen? Die Flasche und ihre Bilder werden endgültig entfernt.'}</p>
+                <div className="actions">
+                  {b.quantity > 1 && <button className="danger" onClick={() => deleteOne(b)}>1 Flasche</button>}
+                  <button className="danger" onClick={() => deleteEntry(b)}>{b.quantity > 1 ? `Alle ${b.quantity}` : 'Ja, löschen'}</button>
+                  <button className="ghost" onClick={() => setDelId(null)}>Abbrechen</button>
+                </div>
+              </div>
+            )}
           </div>
         )
       })}
@@ -541,10 +595,8 @@ async function createDetector(preferWasm) {
   return { detector: new BarcodeDetector({ formats: FORMATS }), wasm: true }
 }
 
-function Scanner({ onCode, onLabel }) {
+function Scanner({ onCode, onLabel, compact = false, autoStart = false, onClose }) {
   const videoRef = useRef(null)
-  const labelCamRef = useRef(null)
-  const labelGalRef = useRef(null)
   const streamRef = useRef(null)
   const trackRef = useRef(null)
   const activeRef = useRef(false)
@@ -557,6 +609,9 @@ function Scanner({ onCode, onLabel }) {
   const [devIdx, setDevIdx] = useState(0)
   const [compat, setCompat] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [labelOpen, setLabelOpen] = useState(false)
+  const [lf, setLf] = useState({ front: null, back: null })
+  const [lp, setLp] = useState({ front: null, back: null })
 
   function stop() {
     activeRef.current = false
@@ -569,7 +624,7 @@ function Scanner({ onCode, onLabel }) {
     setTorchOn(false)
   }
 
-  useEffect(() => () => stop(), [])
+  useEffect(() => { if (autoStart) start(); return () => stop() }, [])
 
   async function handle(code) {
     setBusy(true)
@@ -578,15 +633,26 @@ function Scanner({ onCode, onLabel }) {
     setBusy(false)
   }
 
-  // Etikett fotografieren: Foto direkt an die KI, danach Formular
-  async function labelPhoto(e) {
-    const file = e.target.files?.[0]
-    e.target.value = ''
-    if (!file) return
-    stop()
+  // Etikett fotografieren: Vorder- und Rückseite, beide zusammen an die KI, danach Formular
+  function pickLabel(slot, file) {
+    setLf(prev => ({ ...prev, [slot]: file }))
+    setLp(prev => ({ ...prev, [slot]: URL.createObjectURL(file) }))
+  }
+  function clearLabel(slot) {
+    setLf(prev => ({ ...prev, [slot]: null }))
+    setLp(prev => ({ ...prev, [slot]: null }))
+  }
+  function closeLabel() {
+    setLabelOpen(false)
+    setLf({ front: null, back: null })
+    setLp({ front: null, back: null })
+    setInfo('')
+  }
+  async function evaluateLabel() {
+    if (!lf.front) return setInfo('Bitte zuerst die Vorderseite fotografieren.')
     setBusy(true)
     setInfo('Etikett wird ausgewertet… das dauert einige Sekunden.')
-    const err = await onLabel(file)
+    const err = await onLabel({ front: lf.front, back: lf.back })
     if (err) setInfo(err)
     setBusy(false)
   }
@@ -689,19 +755,52 @@ function Scanner({ onCode, onLabel }) {
     if (scanning) start(devices[devIdx]?.deviceId, next)
   }
 
+  if (labelOpen) {
+    return (
+      <div className="scanner-box">
+        <h3>Etikett fotografieren</h3>
+        <p>Die Vorderseite ist Pflicht. Die Rückseite hilft, weil dort oft Alkoholgehalt und Füllmenge stehen.</p>
+        <div className="img-grid two-up">
+          <ImageSlot label="Vorderseite" url={lp.front} onPick={f => pickLabel('front', f)} onRemove={() => clearLabel('front')} />
+          <ImageSlot label="Rückseite" url={lp.back} onPick={f => pickLabel('back', f)} onRemove={() => clearLabel('back')} />
+        </div>
+        <button className="scan-btn label-btn" onClick={evaluateLabel} disabled={busy}>{busy ? 'Wertet aus…' : 'Auswerten (KI)'}</button>
+        <button className="scan-btn secondary label-btn" onClick={closeLabel} disabled={busy}>Abbrechen</button>
+        {info && <div className="msg">{info}</div>}
+      </div>
+    )
+  }
+
+  const manualBox = (
+    <div className="inline-add manual">
+      <input inputMode="numeric" placeholder="Code manuell eingeben (8, 12 oder 13 Ziffern)" value={manual} onChange={e => setManual(e.target.value)} />
+      <button disabled={busy} onClick={() => manual.trim() && handle(manual.trim())}>Suchen</button>
+    </div>
+  )
+
+  if (compact) {
+    return (
+      <div className="scanner-box compact">
+        <video ref={videoRef} playsInline muted onClick={tapFocus} style={{ display: scanning ? 'block' : 'none' }} />
+        {!scanning && <button className="scan-btn" onClick={() => start()} disabled={busy}>Kamera starten</button>}
+        <div className="scan-tools">
+          {scanning && torchOk && <button onClick={toggleTorch}>{torchOn ? 'Licht aus' : 'Licht an'}</button>}
+          {scanning && devices.length > 1 && <button onClick={nextCamera}>Kamera wechseln</button>}
+          {scanning && <button onClick={toggleCompat}>{compat ? 'Standard-Scanner' : 'Kompatibler Scanner'}</button>}
+          <button onClick={() => { stop(); onClose && onClose() }}>{scanning ? 'Abbrechen' : 'Schließen'}</button>
+        </div>
+        {manualBox}
+        {info && <div className="msg">{info}</div>}
+      </div>
+    )
+  }
+
   return (
     <div className="scanner-box">
       <h3>Barcode Scanner</h3>
       <p>Kamera auf den Barcode der Flasche richten, etwa 20–30 cm Abstand. Zum Scharfstellen auf das Bild tippen. Ohne Barcode: das Etikett fotografieren, die KI liest die Daten ab.</p>
       {!scanning && <button className="scan-btn" onClick={() => start()} disabled={busy}>Kamera starten</button>}
-      {!scanning && (
-        <>
-          <button className="scan-btn secondary label-btn" onClick={() => labelCamRef.current?.click()} disabled={busy}>Etikett fotografieren (KI)</button>
-          <button type="button" className="gallery-link" onClick={() => labelGalRef.current?.click()} disabled={busy}>oder Etikett-Foto aus der Galerie wählen</button>
-          <input ref={labelCamRef} type="file" accept="image/*" capture="environment" hidden onChange={labelPhoto} />
-          <input ref={labelGalRef} type="file" accept="image/*" hidden onChange={labelPhoto} />
-        </>
-      )}
+      {!scanning && <button className="scan-btn secondary label-btn" onClick={() => setLabelOpen(true)} disabled={busy}>Etikett fotografieren (KI)</button>}
       <video ref={videoRef} playsInline muted onClick={tapFocus} style={{ display: scanning ? 'block' : 'none' }} />
       {scanning && (
         <div className="scan-tools">
@@ -711,10 +810,7 @@ function Scanner({ onCode, onLabel }) {
           <button onClick={stop}>Abbrechen</button>
         </div>
       )}
-      <div className="inline-add manual">
-        <input inputMode="numeric" placeholder="Code manuell eingeben (8, 12 oder 13 Ziffern)" value={manual} onChange={e => setManual(e.target.value)} />
-        <button disabled={busy} onClick={() => manual.trim() && handle(manual.trim())}>Suchen</button>
-      </div>
+      {manualBox}
       {info && <div className="msg">{info}</div>}
     </div>
   )
@@ -807,7 +903,7 @@ async function ensureLookup(lookups, kind, name, country) {
   return name
 }
 
-function initialForm(bottle, prefill, cats) {
+function initialForm(bottle, prefill, cats, series = { roomId: '', locId: '' }) {
   const edit = !!bottle
   const src = bottle || prefill || {}
   const catById = Object.fromEntries(cats.map(c => [c.id, c]))
@@ -832,8 +928,8 @@ function initialForm(bottle, prefill, cats) {
     status: edit ? bottle.status : 'closed',
     quantity: edit ? bottle.quantity : 1,
     fill_percent: edit ? bottle.fill_percent : 100,
-    roomId: edit ? (bottle.room_id || '') : (lsGet('by_room') || ''),
-    locId: edit ? (bottle.location_id || '') : (lsGet('by_loc') || ''),
+    roomId: edit ? (bottle.room_id || '') : (series.roomId || ''),
+    locId: edit ? (bottle.location_id || '') : (series.locId || ''),
     newRoom: '', newLoc: '',
     is_collection: !!src.is_collection,
     is_sample: edit ? bottle.is_sample : false,
@@ -846,13 +942,13 @@ function initialForm(bottle, prefill, cats) {
 
 const SLOTS = [['front', 'Vorderseite'], ['back', 'Rückseite'], ['side', 'Seite (Füllstand)']]
 
-function ImageSlot({ label, url, onPick, onRemove }) {
+function ImageSlot({ label, url, onPick, onRemove, onZoom }) {
   const camRef = useRef(null)
   const galRef = useRef(null)
   const take = e => { const f = e.target.files?.[0]; if (f) onPick(f); e.target.value = '' }
   return (
     <div className="img-slot">
-      <div className="img-box" onClick={() => camRef.current?.click()}>
+      <div className={'img-box' + (url ? ' zoom' : '')} onClick={() => (url && onZoom ? onZoom() : camRef.current?.click())}>
         {url ? <img src={url} alt={label} /> : <span>+ Foto</span>}
       </div>
       <div className="img-label">{label}</div>
@@ -867,21 +963,24 @@ function ImageSlot({ label, url, onPick, onRemove }) {
   )
 }
 
-function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, reload, onDone }) {
+function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, bottles = [], reload, onDone, series, onSeries, onFinish }) {
   const edit = !!bottle
   const mains = cats.filter(c => !c.parent_id)
-  const [f, setF] = useState(() => initialForm(bottle, prefill, cats))
+  const [f, setF] = useState(() => initialForm(bottle, prefill, cats, series))
   const [msg, setMsg] = useState(prefill?.note || '')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [analyzing, setAnalyzing] = useState(false)
+  const [zoomIdx, setZoomIdx] = useState(null)
+  const [scanOpen, setScanOpen] = useState(false)
+  const [done, setDone] = useState(null)
   const fRef = useRef(null)
 
   // Bilder: pro Platz entweder vorhandener Pfad, neue Datei oder entfernt
   const [imgs, setImgs] = useState(() => ({
     front: { path: bottle?.image_front || null, file: prefill?.frontFile || null, preview: prefill?.frontFile ? URL.createObjectURL(prefill.frontFile) : null, removed: false },
-    back: { path: bottle?.image_back || null, file: null, preview: null, removed: false },
+    back: { path: bottle?.image_back || null, file: prefill?.backFile || null, preview: prefill?.backFile ? URL.createObjectURL(prefill.backFile) : null, removed: false },
     side: { path: bottle?.image_side || null, file: null, preview: null, removed: false },
   }))
   const [signed, setSigned] = useState({})
@@ -924,6 +1023,8 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
   function removeImage(slot) {
     setImgs(prev => ({ ...prev, [slot]: { path: prev[slot].path, file: null, preview: null, removed: true } }))
   }
+  const zoomList = SLOTS.map(([slot, label]) => ({ slot, label, url: slotUrl(slot) })).filter(z => z.url)
+
   function slotUrl(slot) {
     const s = imgs[slot]
     if (s.preview) return s.preview
@@ -1040,6 +1141,7 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
     if (!sizeMl || sizeMl <= 0) return 'Bitte eine Flaschengröße angeben.'
     if (!f.roomId || (f.roomId === '__new' && !f.newRoom.trim())) return 'Bitte einen Raum wählen.'
     if (f.locId === '__new' && !f.newLoc.trim()) return 'Bitte einen Namen für den neuen Ort eingeben.'
+    if (f.roomId !== '__new' && roomLocs.length > 0 && !f.locId) return 'Bitte einen Ort wählen (Truhe, Kiste …).'
     if (f.country === '__new' && !f.newCountry.trim()) return 'Bitte einen Namen für das neue Land eingeben.'
     if (f.region === '__new' && !f.newRegion.trim()) return 'Bitte einen Namen für die neue Region eingeben.'
     return ''
@@ -1086,9 +1188,6 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
         min_stock: f.min_stock === '' ? null : parseInt(f.min_stock, 10),
       }
 
-      lsSet('by_room', roomId)
-      lsSet('by_loc', locationId || '')
-
       if (edit) {
         const { error: e1 } = await supabase.from('bottles').update(row).eq('id', bottle.id)
         if (e1) throw e1
@@ -1119,17 +1218,8 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
       let imageProblem = ''
       try { await syncImages(data.id) } catch (e) { imageProblem = ' Die Bilder konnten nicht hochgeladen werden: ' + e.message }
 
-      setMsg(`Gespeichert: ${row.brand} ${row.name}.${imageProblem}`)
-      setF(prev => ({
-        ...prev,
-        brand: '', name: '', vintage: '', abv: '', barcode: '', notes: '', quantity: 1,
-        roomId, locId: locationId || '', newRoom: '', newLoc: '', newCountry: '', newRegion: '',
-      }))
-      setImgs({
-        front: { path: null, file: null, preview: null, removed: false },
-        back: { path: null, file: null, preview: null, removed: false },
-        side: { path: null, file: null, preview: null, removed: false },
-      })
+      onSeries && onSeries(roomId, locationId || '')
+      setDone({ title: `${row.brand} ${row.name}`, roomId, locId: locationId || '', imageProblem })
       reload()
     } catch (e) {
       setError('Fehler beim Speichern: ' + e.message)
@@ -1153,8 +1243,57 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
     }
   }
 
+  function newBottle() {
+    const blank = { path: null, file: null, preview: null, removed: false }
+    setF(initialForm(null, null, cats, { roomId: done.roomId, locId: done.locId }))
+    setImgs({ front: { ...blank }, back: { ...blank }, side: { ...blank } })
+    setMsg('')
+    setError('')
+    setDone(null)
+    window.scrollTo({ top: 0 })
+  }
+
+  // Barcode im Formular: Treffer füllen nur leere Felder
+  async function onScanCode(raw) {
+    setScanOpen(false)
+    const data = await resolveCode(raw, bottles, cats)
+    if (!data) return
+    const patch = initialForm(null, data, cats)
+    setF(prev => {
+      const next = { ...prev }
+      for (const k of ['brand', 'name', 'abv', 'vintage', 'country', 'region', 'min_stock']) {
+        if (!prev[k] && patch[k]) next[k] = patch[k]
+      }
+      if (!prev.mainId && patch.mainId) { next.mainId = patch.mainId; next.subId = patch.subId }
+      else if (prev.mainId === patch.mainId && !prev.subId && patch.subId) next.subId = patch.subId
+      if (data.size_ml && prev.size === '700' && !prev.customSize) { next.size = patch.size; next.customSize = patch.customSize }
+      if (patch.is_collection && !prev.is_collection) next.is_collection = true
+      if (patch.newCountry && !prev.country) { next.country = patch.country; next.newCountry = patch.newCountry }
+      next.barcode = patch.barcode
+      return next
+    })
+    setMsg(data.note || '')
+    setError('')
+  }
+
+  if (!edit && done) {
+    return (
+      <div className="form">
+        <div className="msg">Gespeichert: {done.title}.{done.imageProblem}</div>
+        <button type="button" className="save-btn" onClick={newBottle}>Neue Flasche</button>
+        <button type="button" className="scan-btn secondary" style={{ width: '100%', marginTop: 0 }} onClick={onFinish}>Zur Übersicht</button>
+      </div>
+    )
+  }
+
   return (
     <div className="form">
+      {!edit && !scanOpen && (
+        <button type="button" className="scan-btn secondary" style={{ width: '100%', marginTop: 0 }} onClick={() => setScanOpen(true)}>Barcode scannen</button>
+      )}
+      {!edit && scanOpen && (
+        <Scanner compact autoStart onCode={onScanCode} onClose={() => setScanOpen(false)} />
+      )}
       {edit && (
         <div className="edit-head">
           <button type="button" className="link-back" onClick={onDone}>← Zurück</button>
@@ -1228,16 +1367,20 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
 
       {f.roomId && (
         <select value={locValid || f.locId === '__new' ? f.locId : ''} onChange={e => set('locId', e.target.value)}>
-          <option value="">– kein Ort –</option>
+          <option value="">{roomLocs.length > 0 ? 'Ort wählen *' : '– kein Ort –'}</option>
           {roomLocs.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
           <option value="__new">+ Neuer Ort…</option>
         </select>
       )}
       {f.locId === '__new' && <input placeholder="Name des neuen Ortes, z. B. Kiste 4" value={f.newLoc} onChange={e => set('newLoc', e.target.value)} />}
 
+      {zoomIdx !== null && zoomList.length > 0 && (
+        <Lightbox images={zoomList} start={Math.max(0, zoomIdx)} onClose={() => setZoomIdx(null)} />
+      )}
       <div className="img-grid">
         {SLOTS.map(([slot, label]) => (
-          <ImageSlot key={slot} label={label} url={slotUrl(slot)} onPick={file => pickImage(slot, file)} onRemove={() => removeImage(slot)} />
+          <ImageSlot key={slot} label={label} url={slotUrl(slot)} onPick={file => pickImage(slot, file)} onRemove={() => removeImage(slot)}
+            onZoom={() => setZoomIdx(zoomList.findIndex(z => z.slot === slot))} />
         ))}
       </div>
 
