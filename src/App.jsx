@@ -9,6 +9,7 @@ import Chat from './Chat'
 import Einkauf from './Einkauf'
 import Lieferung from './Lieferung'
 import Export from './Export'
+import WakeToggle from './WakeLock'
 import './App.css'
 
 /* ---------- Logos ---------- */
@@ -77,6 +78,7 @@ function Shell({ children, onLogout }) {
             <p>Spirits Inventory</p>
           </div>
         </div>
+        {onLogout && <WakeToggle />}
         {onLogout && <button className="link-btn" onClick={onLogout}>Abmelden</button>}
       </header>
       {children}
@@ -317,11 +319,40 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit })
   const [msg, setMsg] = useState('')
   const [delId, setDelId] = useState(null)
   const [gallery, setGallery] = useState(null)
+  const [selMode, setSelMode] = useState(false)
+  const [sel, setSel] = useState(() => new Set())
+  const [mvOpen, setMvOpen] = useState(false)
+  const [mvRoom, setMvRoom] = useState('')
+  const [mvLoc, setMvLoc] = useState('')
+  const [mvBusy, setMvBusy] = useState(false)
+  const [moved, setMoved] = useState('')
 
   const catById = useMemo(() => Object.fromEntries(cats.map(c => [c.id, c])), [cats])
   const roomById = useMemo(() => Object.fromEntries(rooms.map(r => [r.id, r])), [rooms])
   const locById = useMemo(() => Object.fromEntries(locations.map(l => [l.id, l])), [locations])
   const mains = cats.filter(c => !c.parent_id)
+
+  function toggleSel(id) {
+    setSel(prev => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n })
+  }
+  function endSelect() {
+    setSelMode(false); setSel(new Set()); setMvOpen(false); setMvRoom(''); setMvLoc('')
+  }
+  async function moveSelected() {
+    if (!mvRoom || sel.size === 0) return
+    setMvBusy(true); setMsg('')
+    const ids = [...sel]
+    for (let i = 0; i < ids.length; i += 100) {
+      const { error } = await supabase.from('bottles').update({ room_id: mvRoom, location_id: mvLoc || null }).in('id', ids.slice(i, i + 100))
+      if (error) { setMvBusy(false); return fail(error) }
+    }
+    const target = [roomById[mvRoom]?.name, mvLoc ? locById[mvLoc]?.name : null].filter(Boolean).join(' › ')
+    setMvBusy(false)
+    endSelect()
+    setMsg('')
+    await reload()
+    setMoved(`${ids.length} ${ids.length === 1 ? 'Eintrag' : 'Einträge'} verschoben nach ${target}.`)
+  }
 
   function mainOf(b) {
     const c = catById[b.category_id]
@@ -482,9 +513,42 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit })
           </select>
         </div>
         <div className="count">{filtered.length} Einträge · {total} Flaschen</div>
+        <div className="sel-toggle">
+          {!selMode && <button type="button" className="ghost" onClick={() => { setSelMode(true); setMoved('') }}>Mehrere auswählen</button>}
+          {selMode && <button type="button" className="ghost" onClick={endSelect}>Auswahl beenden</button>}
+        </div>
       </div>
 
       {msg && <div className="msg error">{msg}</div>}
+      {moved && !selMode && <div className="msg">{moved}</div>}
+      {selMode && (
+        <div className="sel-bar">
+          <div className="sel-count">{sel.size} ausgewählt</div>
+          <div className="sel-btns">
+            <button type="button" onClick={() => setSel(new Set(filtered.map(b => b.id)))}>Alle {filtered.length} sichtbaren</button>
+            <button type="button" disabled={sel.size === 0} onClick={() => setSel(new Set())}>Keine</button>
+            <button type="button" className="primary" disabled={sel.size === 0} onClick={() => setMvOpen(v => !v)}>Verschieben…</button>
+          </div>
+          {mvOpen && sel.size > 0 && (
+            <div className="sel-move">
+              <select value={mvRoom} onChange={e => { setMvRoom(e.target.value); setMvLoc('') }}>
+                <option value="">Neuer Raum *</option>
+                {rooms.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
+              </select>
+              {mvRoom && (
+                <select value={mvLoc} onChange={e => setMvLoc(e.target.value)}>
+                  <option value="">– kein Ort –</option>
+                  {locations.filter(l => l.room_id === mvRoom).map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
+                </select>
+              )}
+              <button type="button" className="primary" disabled={!mvRoom || mvBusy} onClick={moveSelected}>
+                {mvBusy ? 'Verschiebt…' : `${sel.size} ${sel.size === 1 ? 'Eintrag' : 'Einträge'} verschieben`}
+              </button>
+              <div className="hint">Neue Räume und Orte legst du im Tab „Lagerorte“ an.</div>
+            </div>
+          )}
+        </div>
+      )}
       {gallery && <Lightbox images={gallery.images} onClose={() => setGallery(null)} />}
 
       {filtered.length === 0 && (
@@ -498,7 +562,12 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit })
         const place = [roomById[b.room_id]?.name, locById[b.location_id]?.name].filter(Boolean).join(' › ')
         const thumb = b.image_thumb ? thumbs[b.image_thumb] : null
         return (
-          <div key={b.id} className={'card' + (b.status === 'empty' ? ' dim' : '')}>
+          <div key={b.id} className={'card' + (b.status === 'empty' ? ' dim' : '') + (selMode && sel.has(b.id) ? ' picked' : '')}>
+            {selMode && (
+              <label className="sel-check" onClick={e => e.stopPropagation()}>
+                <input type="checkbox" checked={sel.has(b.id)} onChange={() => toggleSel(b.id)} />
+              </label>
+            )}
             <div className={'card-icon' + (thumb ? ' has-thumb zoomable' : '')} onClick={thumb ? () => openGallery(b) : undefined}>
               {thumb ? <img className="thumb" src={thumb} alt="" loading="lazy" /> : <BottleIcon />}
             </div>
@@ -527,7 +596,7 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit })
                 <button type="button" className={'tag tag-btn' + (b.reorder ? ' on' : '')} onClick={() => toggleReorder(b)}>{b.reorder ? 'Vorgemerkt ✓' : '+ Nachkaufen'}</button>
               </div>
             </div>
-            {delId !== b.id && (
+            {delId !== b.id && !selMode && (
               <div className="actions full">
                 {b.status === 'closed' && <button onClick={() => openOne(b)}>Öffnen</button>}
                 {b.status === 'open' && <button onClick={() => markEmpty(b)}>Leer</button>}
@@ -1049,6 +1118,7 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
   const [zoomIdx, setZoomIdx] = useState(null)
   const [scanOpen, setScanOpen] = useState(false)
   const [done, setDone] = useState(null)
+  const [keepOld, setKeepOld] = useState(true)
   const fRef = useRef(null)
 
   // Bilder: pro Platz entweder vorhandener Pfad, neue Datei oder entfernt
@@ -1144,39 +1214,41 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
   }
 
   // Foto-Auswertung mit Claude (über die Supabase-Funktion analyze-label)
-  function applyAi(r) {
+  function applyAi(r, keep = false) {
     if (!r) throw new Error('Keine Antwort erhalten')
     const cur = fRef.current
     const next = { ...cur }
     const filled = []
     const same = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase()
+    // keep = vorhandene Angaben behalten, nur leere Felder ergänzen
+    const take = isSet => !(keep && isSet)
 
-    if (r.brand) { next.brand = r.brand; filled.push('Marke') }
-    if (r.name) { next.name = r.name; filled.push('Name') }
+    if (r.brand && take(String(cur.brand).trim())) { next.brand = r.brand; filled.push('Marke') }
+    if (r.name && take(String(cur.name).trim())) { next.name = r.name; filled.push('Name') }
 
     const m = r.main_category ? mains.find(c => same(c.name, r.main_category)) : null
-    if (m) {
+    if (m && take(cur.mainId)) {
       next.mainId = m.id
       const s = r.sub_category ? cats.find(c => c.parent_id === m.id && same(c.name, r.sub_category)) : null
       next.subId = s ? s.id : ''
       filled.push(s ? 'Kategorie und Subkategorie' : 'Kategorie')
     }
 
-    if (r.abv !== null && r.abv !== undefined) { next.abv = String(r.abv); filled.push('Alkoholgehalt') }
-    if (r.size_ml) {
+    if (r.abv !== null && r.abv !== undefined && take(String(cur.abv) !== '')) { next.abv = String(r.abv); filled.push('Alkoholgehalt') }
+    if (r.size_ml && take(true)) {
       if (SIZES.includes(r.size_ml)) { next.size = String(r.size_ml); next.customSize = '' }
       else { next.size = 'other'; next.customSize = String(r.size_ml) }
       filled.push('Größe')
     }
-    if (r.vintage) { next.vintage = r.vintage; filled.push('Jahrgang') }
+    if (r.vintage && take(String(cur.vintage).trim())) { next.vintage = r.vintage; filled.push('Jahrgang') }
 
-    if (r.country) {
+    if (r.country && take(cur.country)) {
       const known = lookups.find(l => l.kind === 'country' && same(l.name, r.country))
       if (known) { next.country = known.name; next.newCountry = '' }
       else { next.country = '__new'; next.newCountry = r.country }
       filled.push('Herkunftsland')
     }
-    if (r.region) {
+    if (r.region && take(cur.region)) {
       const country = next.country === '__new' ? next.newCountry : next.country
       const known = lookups.find(l => l.kind === 'region' && same(l.name, r.region) && (!l.country || !country || l.country === country))
       if (known) { next.region = known.name; next.newRegion = '' }
@@ -1187,19 +1259,30 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
 
     setF(next)
     setMsg(filled.length > 0
-      ? `Aus dem Foto übernommen: ${filled.join(', ')}. Bitte alles prüfen.`
-      : 'Auf dem Foto konnte nichts sicher erkannt werden.')
+      ? `Aus dem Foto ${keep ? 'ergänzt' : 'übernommen'}: ${filled.join(', ')}. Bitte alles prüfen.`
+      : (keep ? 'Es wurde nichts ergänzt, alle erkannten Felder sind schon befüllt.' : 'Auf dem Foto konnte nichts sicher erkannt werden.'))
   }
 
   async function analyze() {
     setError('')
     setMsg('')
-    const files = SLOTS.map(([slot]) => imgs[slot].file).filter(Boolean)
-    if (files.length === 0) return setError('Bitte zuerst mindestens ein Foto auswählen.')
+    const hasAny = SLOTS.some(([slot]) => imgs[slot].file || (slot !== 'side' && !imgs[slot].removed && imgs[slot].path))
+    if (!hasAny) return setError('Bitte zuerst mindestens ein Foto auswählen.')
     setAnalyzing(true)
     try {
+      // neue Fotos nehmen, sonst die gespeicherten Fotos der Flasche laden
+      const files = []
+      for (const [slot] of SLOTS) {
+        const s = imgs[slot]
+        if (s.file) files.push(s.file)
+        else if (!s.removed && s.path && slot !== 'side') {
+          const dl = await supabase.storage.from(BUCKET).download(s.path)
+          if (dl.error) throw new Error('Gespeichertes Foto konnte nicht geladen werden: ' + dl.error.message)
+          files.push(dl.data)
+        }
+      }
       const result = await runAnalyze(files, cats, lookups)
-      applyAi(result)
+      applyAi(result, edit && keepOld)
     } catch (e) {
       setError('Auswertung fehlgeschlagen: ' + e.message)
     }
@@ -1463,7 +1546,10 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
       <button type="button" className="ai-btn" onClick={analyze} disabled={analyzing}>
         {analyzing ? 'Wertet aus…' : 'Foto auswerten (KI)'}
       </button>
-      <p className="hint">Liest Marke, Name, Kategorie, Alkoholgehalt, Größe und Herkunft von den gewählten Fotos ab und füllt die Felder vor. Bereits eingetragene Produktdaten werden dabei ersetzt.</p>
+      {edit && (
+        <label className="check"><input type="checkbox" checked={keepOld} onChange={e => setKeepOld(e.target.checked)} /> Vorhandene Angaben behalten, nur leere Felder ergänzen</label>
+      )}
+      <p className="hint">Liest Marke, Name, Kategorie, Alkoholgehalt, Größe und Herkunft von den Fotos ab und füllt die Felder vor. {edit ? 'Ohne neue Fotos werden die gespeicherten Fotos der Flasche verwendet. ' : ''}{edit && keepOld ? 'Bereits eingetragene Angaben bleiben unverändert.' : 'Bereits eingetragene Produktdaten werden dabei ersetzt.'}</p>
 
       <input placeholder="Barcode (optional)" inputMode="numeric" value={f.barcode} onChange={e => set('barcode', e.target.value)} />
       <input placeholder="Mindestbestand (optional)" type="number" min="0" value={f.min_stock} onChange={e => set('min_stock', e.target.value)} />

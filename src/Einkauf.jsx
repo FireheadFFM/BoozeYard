@@ -27,6 +27,12 @@ export default function Einkauf({ bottles, wishlist = [], reload }) {
     else reload()
   }
 
+  async function dropLow(b) {
+    const { error } = await supabase.from('bottles').update({ min_stock: 0, reorder: false }).eq('id', b.id)
+    if (error) setMsg('Fehler: ' + error.message)
+    else reload()
+  }
+
   async function addItem() {
     const name = newItem.trim()
     if (!name) return
@@ -119,7 +125,7 @@ export default function Einkauf({ bottles, wishlist = [], reload }) {
             {pr?.error && <div className="msg error full">{pr.error}</div>}
             <div className="actions full">
               <button onClick={() => searchPrices({ id: 'w' + w.id }, q)} disabled={pr?.loading}>{pr?.loading ? 'Sucht Preise…' : 'Preise suchen (KI)'}</button>
-              <button className="ghost" onClick={() => removeItem(w)}>Erledigt</button>
+              <button className="ghost" onClick={() => removeItem(w)}>Entfernen</button>
             </div>
           </div>
         )
@@ -167,9 +173,10 @@ export default function Einkauf({ bottles, wishlist = [], reload }) {
 
             <div className="actions full">
               <button onClick={() => searchPrices(b)} disabled={pr?.loading}>{pr?.loading ? 'Sucht Preise…' : 'Preise suchen (KI)'}</button>
-              {flagged && <button className="ghost" onClick={() => clearFlag(b)}>Erledigt</button>}
+              {flagged && !low && <button className="ghost" onClick={() => clearFlag(b)}>Entfernen</button>}
+              {low && <button className="ghost" onClick={() => dropLow(b)}>Nicht mehr nachkaufen</button>}
             </div>
-            {low && !flagged && <div className="hint full">Verschwindet, sobald der Bestand wieder reicht (Lieferung erfassen).</div>}
+            {low && <div className="hint full">Verschwindet, sobald der Bestand wieder reicht (Lieferung erfassen). „Nicht mehr nachkaufen“ setzt den Mindestbestand auf 0.</div>}
           </div>
         )
       })}

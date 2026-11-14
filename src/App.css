@@ -269,3 +269,26 @@ video { width: 100%; border-radius: 8px; margin-top: 14px; border: 1px solid #3a
 .chat-input .send { padding: 0 14px; border-radius: 10px; border: none; background: #c8891a; color: #0f0a06; font-family: inherit; font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; cursor: pointer; }
 .chat-input .send:disabled { opacity: 0.5; }
 @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(200,137,26,0.6); } 70% { box-shadow: 0 0 0 10px rgba(200,137,26,0); } 100% { box-shadow: 0 0 0 0 rgba(200,137,26,0); } }
+
+/* ---------- Update 10 ---------- */
+.link-btn.wake { right: auto; left: 14px; }
+.link-btn.wake.on { color: #f0c96a; }
+.sel-toggle { display: flex; justify-content: flex-end; }
+.sel-toggle button { padding: 7px 12px; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; border-radius: 8px; border: 1px solid #4a3018; background: transparent; color: #c8a96a; font-family: inherit; cursor: pointer; }
+.sel-bar { position: sticky; top: 0; z-index: 5; background: #120b05; border: 1px solid #c8891a; border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; display: flex; flex-direction: column; gap: 8px; }
+.sel-count { font-size: 12px; letter-spacing: 0.08em; color: #f0c96a; text-transform: uppercase; }
+.sel-btns { display: flex; gap: 6px; flex-wrap: wrap; }
+.sel-btns button, .sel-move button { padding: 8px 10px; font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase; border-radius: 8px; border: 1px solid #4a3018; background: transparent; color: #c8a96a; font-family: inherit; cursor: pointer; }
+.sel-btns button.primary, .sel-move button.primary { border-color: #c8891a; background: #c8891a; color: #0f0a06; }
+.sel-btns button:disabled, .sel-move button:disabled { opacity: 0.45; }
+.sel-move { display: flex; flex-direction: column; gap: 8px; }
+.sel-move select { padding: 10px 12px; font-size: 13px; }
+.sel-check { display: flex; align-items: center; justify-content: center; width: 30px; align-self: center; flex-shrink: 0; }
+.sel-check input { width: 22px; height: 22px; accent-color: #c8891a; }
+.card.picked { border-color: #c8891a; }
+.chat-body.notes { gap: 8px; }
+.note-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 12px; border: 1px solid #3a2810; border-radius: 10px; background: #1a0f05; font-size: 13px; color: #f0e6d3; }
+.note-row span { flex: 1; min-width: 0; }
+.note-row button, .note-add button { padding: 6px 10px; border-radius: 8px; border: 1px solid #4a3018; background: transparent; color: #c8a96a; font-family: inherit; font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; cursor: pointer; flex-shrink: 0; }
+.note-add { display: flex; gap: 8px; }
+.note-add input { flex: 1; min-width: 0; padding: 10px 12px; border-radius: 10px; border: 1px solid #3a2810; background: #1a0f05; color: #f0e6d3; font-family: inherit; font-size: 14px; outline: none; }

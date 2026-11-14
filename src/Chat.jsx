@@ -27,6 +27,10 @@ export default function Chat({ hidden, onOpenBottle, reload }) {
   const [speaking, setSpeaking] = useState(false)
   const [tts, setTts] = useState(lsGet('chat_tts') !== '0')
   const [conv, setConv] = useState(lsGet('chat_conv') === '1')
+  const [notesOpen, setNotesOpen] = useState(false)
+  const [notes, setNotes] = useState([])
+  const [newNote, setNewNote] = useState('')
+  const [noteErr, setNoteErr] = useState('')
   const ttsRef = useRef(tts)
   const convRef = useRef(conv)
   const recRef = useRef(null)
@@ -158,6 +162,30 @@ export default function Chat({ hidden, onOpenBottle, reload }) {
     setBusy(false)
   }
 
+  async function loadNotes() {
+    const { data, error } = await supabase.from('chat_notes').select('id,text').order('created_at')
+    if (error) setNoteErr('Merkliste nicht verfügbar: ' + error.message + ' (Update-10-SQL ausgeführt?)')
+    else { setNoteErr(''); setNotes(data || []) }
+  }
+  async function addNote() {
+    const t = newNote.trim()
+    if (!t) return
+    const { error } = await supabase.from('chat_notes').insert({ text: t.slice(0, 300) })
+    if (error) return setNoteErr('Fehler: ' + error.message)
+    setNewNote('')
+    loadNotes()
+  }
+  async function delNote(n) {
+    const { error } = await supabase.from('chat_notes').delete().eq('id', n.id)
+    if (error) return setNoteErr('Fehler: ' + error.message)
+    loadNotes()
+  }
+  function toggleNotes() {
+    stopSpeak(); stopListen()
+    if (!notesOpen) loadNotes()
+    setNotesOpen(v => !v)
+  }
+
   if (hidden && !open) return null
 
   if (!open) {
@@ -175,12 +203,30 @@ export default function Chat({ hidden, onOpenBottle, reload }) {
         <span className="chat-tools">
           <button className={tts ? 'on' : ''} onClick={() => setTts(v => !v)}>{tts ? 'Ton an' : 'Stumm'}</button>
           {SR && <button className={conv ? 'on' : ''} onClick={() => setConv(v => !v)} title="Nach jeder Antwort automatisch wieder zuhören">Gespräch</button>}
+          <button className={notesOpen ? 'on' : ''} onClick={toggleNotes}>Merkliste</button>
           {speaking && <button className="stop" onClick={stopSpeak}>Stopp</button>}
           <button onClick={() => setOpen(false)}>Schließen</button>
         </span>
       </div>
 
-      <div className="chat-body">
+      {notesOpen && (
+        <div className="chat-body notes">
+          <p className="hint">Feste Absprachen, die der Assistent bei jeder Frage beachtet, z. B. „Mein Standard-Bourbon ist der Buffalo Trace“ oder „Der Gelbe ist der Chartreuse“. Du kannst auch im Chat sagen: „Merk dir …“.</p>
+          {noteErr && <div className="msg error">{noteErr}</div>}
+          {notes.length === 0 && !noteErr && <div className="hint">Noch nichts gemerkt.</div>}
+          {notes.map(n => (
+            <div key={n.id} className="note-row">
+              <span>{n.text}</span>
+              <button className="ghost" onClick={() => delNote(n)}>Entfernen</button>
+            </div>
+          ))}
+          <div className="note-add">
+            <input value={newNote} placeholder="Neue Absprache" maxLength={300} onChange={e => setNewNote(e.target.value)} onKeyDown={e => e.key === 'Enter' && addNote()} />
+            <button disabled={!newNote.trim()} onClick={addNote}>Hinzufügen</button>
+          </div>
+        </div>
+      )}
+      <div className="chat-body" style={notesOpen ? { display: 'none' } : undefined}>
         {msgs.length === 0 && (
           <div className="chat-empty">
             <p>Frag mich zum Bestand oder sag, was sich geändert hat. Zum Beispiel:</p>

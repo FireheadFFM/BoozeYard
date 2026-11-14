@@ -23,12 +23,13 @@ const STATUS_DE: Record<string, string> = { closed: "geschlossen", open: "offen"
 /* ---------- Daten laden ---------- */
 
 async function loadData(db: any) {
-  const [b, r, l, c, w] = await Promise.all([
+  const [b, r, l, c, w, n] = await Promise.all([
     db.from("bottles").select("*").limit(5000),
     db.from("rooms").select("id,name"),
     db.from("locations").select("id,name,room_id"),
     db.from("categories").select("id,name,parent_id"),
     db.from("wishlist").select("*"),
+    db.from("chat_notes").select("id,text").order("created_at"),
   ]);
   if (b.error) throw new Error(b.error.message);
   const room = new Map((r.data ?? []).map((x: any) => [x.id, x.name]));
@@ -46,7 +47,7 @@ async function loadData(db: any) {
       last_price: x.last_price === null || x.last_price === undefined ? null : Number(x.last_price), notes: x.notes,
     };
   });
-  return { rows, wishlist: w.error ? [] : (w.data ?? []) };
+  return { rows, wishlist: w.error ? [] : (w.data ?? []), notes: n.error ? [] : (n.data ?? []) };
 }
 
 const label = (r: any) => `${r.brand} ${r.name}${r.abv ? ` ${String(r.abv).replace(".", ",")} %` : ""}${r.size_ml ? ` ${r.size_ml} ml` : ""}`;
@@ -103,7 +104,7 @@ const TOOLS = [
   },
   {
     name: "propose_changes",
-    description: "Schlägt Änderungen vor. Es wird NICHTS geändert, der Benutzer muss erst bestätigen. Beendet deinen Zug. Aktionen: mark_open (eine geschlossene Flasche öffnen, bottle_id), mark_empty (offene Flasche leer melden, bottle_id), set_fill (Füllstand offene Flasche, bottle_id, percent 0-100), set_quantity (Anzahl, bottle_id, quantity), set_reorder (Nachkaufen-Vormerkung, bottle_id, value true/false), add_wishlist (Produkt auf die Einkaufsliste, brand optional, name, quantity optional, notes optional), remove_wishlist (wishlist_id).",
+    description: "Schlägt Änderungen vor. Es wird NICHTS geändert, der Benutzer muss erst bestätigen. Beendet deinen Zug. Aktionen: mark_open (eine geschlossene Flasche öffnen, bottle_id), mark_empty (offene Flasche leer melden, bottle_id), set_fill (Füllstand offene Flasche, bottle_id, percent 0-100), set_quantity (Anzahl, bottle_id, quantity), set_reorder (Nachkaufen-Vormerkung, bottle_id, value true/false), add_wishlist (Produkt auf die Einkaufsliste, brand optional, name, quantity optional, notes optional), remove_wishlist (wishlist_id), add_note (dauerhafte Absprache in die Merkliste, text), remove_note (Eintrag aus der Merkliste, note_id).",
     input_schema: {
       type: "object",
       properties: {
@@ -112,8 +113,8 @@ const TOOLS = [
           items: {
             type: "object",
             properties: {
-              action: { type: "string", enum: ["mark_open", "mark_empty", "set_fill", "set_quantity", "set_reorder", "add_wishlist", "remove_wishlist"] },
-              bottle_id: { type: "string" }, wishlist_id: { type: "string" },
+              action: { type: "string", enum: ["mark_open", "mark_empty", "set_fill", "set_quantity", "set_reorder", "add_wishlist", "remove_wishlist", "add_note", "remove_note"] },
+              bottle_id: { type: "string" }, wishlist_id: { type: "string" }, note_id: { type: "string" }, text: { type: "string" },
               percent: { type: "integer" }, quantity: { type: "integer" }, value: { type: "boolean" },
               brand: { type: "string" }, name: { type: "string" }, notes: { type: "string" },
             },
@@ -275,6 +276,19 @@ async function applyAction(db: any, a: any): Promise<{ text: string; undo: any[]
       ok(await db.from("wishlist").delete().eq("id", w.id));
       return { text: `${`${w.brand ?? ""} ${w.name}`.trim()}: von der Einkaufsliste genommen`, undo: [{ type: "readd_wishlist", row: { brand: w.brand ?? "", name: w.name, quantity: w.quantity ?? 1, notes: w.notes } }] };
     }
+    case "add_note": {
+      const t = String(a.text ?? "").trim().slice(0, 300);
+      if (!t) throw new Error("Text für die Merkliste fehlt");
+      const ins = ok(await db.from("chat_notes").insert({ text: t }).select("id").single());
+      return { text: `Gemerkt: ${t}`, undo: [{ type: "delete_note", id: ins.data.id }] };
+    }
+    case "remove_note": {
+      if (!UUID.test(String(a.note_id))) throw new Error("Ungültige ID");
+      const { data: n } = await db.from("chat_notes").select("*").eq("id", a.note_id).single();
+      if (!n) throw new Error("Eintrag nicht gefunden");
+      ok(await db.from("chat_notes").delete().eq("id", n.id));
+      return { text: `Aus der Merkliste entfernt: ${n.text}`, undo: [{ type: "readd_note", text: n.text }] };
+    }
     default: throw new Error("Unbekannte Aktion");
   }
 }
@@ -290,6 +304,10 @@ async function applyUndo(db: any, step: any) {
     }
   } else if (step.type === "delete_bottle") {
     if (UUID.test(String(step.id))) ok(await db.from("bottles").delete().eq("id", step.id));
+  } else if (step.type === "delete_note") {
+    if (UUID.test(String(step.id))) ok(await db.from("chat_notes").delete().eq("id", step.id));
+  } else if (step.type === "readd_note") {
+    ok(await db.from("chat_notes").insert({ text: String(step.text ?? "").slice(0, 300) }));
   } else if (step.type === "delete_wishlist") {
     if (UUID.test(String(step.id))) ok(await db.from("wishlist").delete().eq("id", step.id));
   } else if (step.type === "readd_wishlist") {
@@ -301,7 +319,7 @@ async function applyUndo(db: any, step: any) {
 
 /* ---------- Beschreibung eines Vorschlags für die Rückfrage ---------- */
 
-function describe(a: any, rows: any[], wishlist: any[]) {
+function describe(a: any, rows: any[], wishlist: any[], notes: any[] = []) {
   const byId = (id: string) => rows.find((r) => r.id === id);
   const r = a.bottle_id ? byId(a.bottle_id) : null;
   const who = r ? label(r) : "";
@@ -313,11 +331,13 @@ function describe(a: any, rows: any[], wishlist: any[]) {
     case "set_reorder": return `${who}: ${a.value ? "auf die Einkaufsliste setzen" : "von der Einkaufsliste nehmen"}`;
     case "add_wishlist": return `${`${a.brand ?? ""} ${a.name ?? ""}`.trim()}${a.quantity > 1 ? ` (${a.quantity}×)` : ""}: neu auf die Einkaufsliste`;
     case "remove_wishlist": { const w = wishlist.find((x) => x.id === a.wishlist_id); return `${w ? `${w.brand ?? ""} ${w.name}`.trim() : "Eintrag"}: von der Einkaufsliste entfernen`; }
+    case "add_note": return `In die Merkliste aufnehmen: ${String(a.text ?? "").slice(0, 300)}`;
+    case "remove_note": { const n = notes.find((x) => x.id === a.note_id); return `Aus der Merkliste entfernen: ${n ? n.text : "Eintrag"}`; }
     default: return String(a.action);
   }
 }
 
-const systemPrompt = () => `Du bist der Bar-Assistent in der Bestands-App eines Barmanns (Hausbar mit über 1000 Flaschen, Spirituosen, Liköre, Bitters, Sirupe).
+const systemPrompt = (notes: any[] = []) => `Du bist der Bar-Assistent in der Bestands-App eines Barmanns (Hausbar mit über 1000 Flaschen, Spirituosen, Liköre, Bitters, Sirupe).
 Heute ist ${new Date().toISOString().slice(0, 10)}.
 Regeln:
 - Antworte auf Deutsch, kurz und klar, in ein bis drei Sätzen. Die Antworten werden oft vorgelesen: keine Aufzählungszeichen, keine Markdown-Formatierung, keine Emojis, keine IDs im Text.
@@ -329,7 +349,10 @@ Regeln:
 - Für "setz X auf die Einkaufsliste": Suche X auch unter leeren Flaschen (status any). Gibt es eine passende Flasche, nutze set_reorder. Gibt es keine, nutze add_wishlist mit Marke und Name.
 - Bei Listen nutze show_bottles, damit der Benutzer die Einträge antippen kann, und nenne im Text nur die Anzahl und das Wichtigste.
 - Cocktailfragen beantwortest du aus deinem Allgemeinwissen und prüfst die Zutaten mit search_bottles gegen den Bestand. Weise kurz darauf hin, dass Rezepte aus deinem Wissen stammen.
-- Außerhalb von Bar, Bestand und Getränken hilfst du nicht.`;
+- Sagt der Benutzer "merk dir ..." oder nennt er eine dauerhafte Absprache (zum Beispiel einen Kurznamen für eine Flasche oder eine Vorliebe), schlage add_note vor. Sagt er "vergiss ...", nutze remove_note.
+- Außerhalb von Bar, Bestand und Getränken hilfst du nicht.${notes.length ? `
+Merkliste des Benutzers (feste Absprachen, beachte sie immer):
+${notes.map((n: any) => `- ${n.text} (note_id ${n.id}, nie vorlesen)`).join("\n")}` : ""}`;
 
 /* ---------- Hauptprogramm ---------- */
 
@@ -381,7 +404,7 @@ Deno.serve(async (req) => {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "content-type": "application/json" },
-      body: JSON.stringify({ model: MODEL, max_tokens: 1500, system: systemPrompt(), tools: TOOLS, messages }),
+      body: JSON.stringify({ model: MODEL, max_tokens: 1500, system: systemPrompt(data.notes), tools: TOOLS, messages }),
     });
     const payload = await res.json().catch(() => null);
     if (!res.ok) return json({ error: `Claude-API: ${payload?.error?.message ?? "HTTP " + res.status}` }, 502);
@@ -401,7 +424,7 @@ Deno.serve(async (req) => {
         return json({ reply: choice.input?.question || text, choices: opts, shown });
       }
       const changes = (propose!.input?.changes ?? []).slice(0, 25);
-      const items = changes.map((a: any) => ({ ...a, label: describe(a, data.rows, data.wishlist) }));
+      const items = changes.map((a: any) => ({ ...a, label: describe(a, data.rows, data.wishlist, data.notes) }));
       return json({ reply: text || "Soll ich das so ändern?", proposal: { items }, shown });
     }
 
