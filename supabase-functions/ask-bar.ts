@@ -22,15 +22,27 @@ const STATUS_DE: Record<string, string> = { closed: "geschlossen", open: "offen"
 
 /* ---------- Daten laden ---------- */
 
+// Supabase liefert pro Abfrage höchstens 1000 Zeilen: seitenweise holen, make() = frische Abfrage mit fester Sortierung
+async function fetchAll(make: () => any, page = 1000) {
+  const out: any[] = [];
+  for (let from = 0; ; from += page) {
+    const res = await make().range(from, from + page - 1);
+    if (res.error) return { data: null, error: res.error };
+    out.push(...res.data);
+    if (res.data.length < page) break;
+  }
+  return { data: out, error: null };
+}
+
 async function loadData(db: any) {
   const [b, r, l, c, w, n, rc] = await Promise.all([
-    db.from("bottles").select("*").limit(5000),
+    fetchAll(() => db.from("bottles").select("*").order("id")),
     db.from("rooms").select("id,name"),
     db.from("locations").select("id,name,room_id"),
     db.from("categories").select("id,name,parent_id"),
     db.from("wishlist").select("*"),
     db.from("chat_notes").select("id,text").order("created_at"),
-    db.from("recipes").select("id,video_id,title,cocktail,ingredients,published_at").eq("is_recipe", true).limit(3000),
+    fetchAll(() => db.from("recipes").select("id,video_id,title,cocktail,ingredients,published_at").eq("is_recipe", true).order("id")),
   ]);
   if (b.error) throw new Error(b.error.message);
   const room = new Map((r.data ?? []).map((x: any) => [x.id, x.name]));
@@ -285,7 +297,7 @@ async function runTool(db: any, data: any, name: string, a: any, ctx: any) {
     }
     case "stale_bottles": {
       const since = new Date(Date.now() - Math.max(1, a.days) * 86400000).toISOString();
-      const { data: mv } = await db.from("movements").select("bottle_id").gte("moved_at", since).limit(20000);
+      const { data: mv } = await fetchAll(() => db.from("movements").select("bottle_id").gte("moved_at", since).order("id"));
       const recent = new Set((mv ?? []).map((m: any) => m.bottle_id));
       const stale = rows.filter((r: any) => r.status !== "empty" && !recent.has(r.id));
       return { treffer: stale.length, eintraege: stale.slice(0, 30).map(brief) };
@@ -451,6 +463,7 @@ Regeln:
 - Bei "was kann ich mixen" nutze makeable_recipes (max_missing 0, bei wenigen Treffern 1). Bei unsicher geführten Zutaten prüfe mit search_bottles nach. Sage ehrlich, dass der Abgleich ungefähr ist. Frische Zutaten (Säfte, Sirup, Eis) setzt du als vorhanden voraus.
 - Gibt es kein passendes Rezept aus den Videos, beantworte Cocktailfragen aus deinem Allgemeinwissen, prüfe die Zutaten mit search_bottles und weise kurz darauf hin, dass das Rezept nicht aus seinen Videos stammt.
 - Sagt der Benutzer "merk dir ..." oder nennt er eine dauerhafte Absprache (zum Beispiel einen Kurznamen für eine Flasche oder eine Vorliebe), schlage add_note vor. Sagt er "vergiss ...", nutze remove_note.
+- Füllstand: Setze ihn mit set_fill auf eine Prozentzahl. Übersetze Umgangssprache so: "voll" 100, "fast voll" 90, "dreiviertel" 75, "halb" 50, "letztes Drittel" oder "ein Drittel" 30, "Viertel" 25, "fast leer" oder "Neige" 10. Sag in deinem Satz die Prozentzahl, damit der Benutzer sie bei der Bestätigung sieht. set_fill geht nur bei offenen Flaschen. Ist die Flasche noch geschlossen, schlage zuerst mark_open und danach set_fill vor, sofern es genau eine Flasche mit Anzahl 1 ist. Sonst frage nach.
 - Außerhalb von Bar, Bestand und Getränken hilfst du nicht.${notes.length ? `
 Merkliste des Benutzers (feste Absprachen, beachte sie immer):
 ${notes.map((n: any) => `- ${n.text} (note_id ${n.id}, nie vorlesen)`).join("\n")}` : ""}`;

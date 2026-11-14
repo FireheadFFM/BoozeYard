@@ -3,6 +3,20 @@
 export const SIZES = [20, 30, 50, 100, 200, 350, 500, 700, 750, 1000, 1500, 1750]
 export const STATUS = { closed: 'Geschlossen', open: 'Offen', empty: 'Leer' }
 export const BUCKET = 'bottle-images'
+export const APP_VERSION = 'U12'
+
+// Holt alle Zeilen seitenweise (Supabase liefert pro Abfrage höchstens 1000).
+// make() muss bei jedem Aufruf eine frische Abfrage mit fester Sortierung liefern.
+export async function fetchAll(make, page = 1000) {
+  const out = []
+  for (let from = 0; ; from += page) {
+    const { data, error } = await make().range(from, from + page - 1)
+    if (error) return { data: null, error }
+    out.push(...data)
+    if (data.length < page) break
+  }
+  return { data: out, error: null }
+}
 
 export function lsGet(key) {
   try { return localStorage.getItem(key) } catch { return null }

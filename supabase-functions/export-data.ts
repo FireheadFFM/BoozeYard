@@ -23,10 +23,21 @@ Deno.serve(async (req) => {
   }
 
   const db = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+  // Supabase liefert pro Abfrage höchstens 1000 Zeilen: seitenweise holen
+  const fetchAll = async (make: () => any) => {
+    const out: any[] = [];
+    for (let from = 0; ; from += 1000) {
+      const res = await make().range(from, from + 999);
+      if (res.error) return { data: null, error: res.error };
+      out.push(...res.data);
+      if (res.data.length < 1000) break;
+    }
+    return { data: out, error: null };
+  };
   const [b, r, l, c] = await Promise.all([
-    db.from("bottles").select("*").order("brand").order("name"),
+    fetchAll(() => db.from("bottles").select("*").order("brand").order("name").order("id")),
     db.from("rooms").select("id,name"),
-    db.from("locations").select("id,name"),
+    fetchAll(() => db.from("locations").select("id,name").order("id")),
     db.from("categories").select("id,name,parent_id"),
   ]);
   if (b.error) return new Response("Fehler: " + b.error.message, { status: 500 });

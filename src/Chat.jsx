@@ -291,7 +291,7 @@ export default function Chat({ hidden, onOpenBottle, reload }) {
         <div ref={endRef} />
       </div>
 
-      <div className="chat-input">
+      {!notesOpen && <div className="chat-input">
         {SR && (
           <button className={'mic' + (listening ? ' live' : '')} onClick={() => (listening ? stopListen() : listen())} aria-label="Sprechen">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="3" width="6" height="11" rx="3" /><path d="M5 11a7 7 0 0 0 14 0M12 18v3" /></svg>
@@ -300,8 +300,8 @@ export default function Chat({ hidden, onOpenBottle, reload }) {
         <input value={input} placeholder={listening ? 'Ich höre zu…' : 'Frage eintippen'} onChange={e => setInput(e.target.value)}
           onKeyDown={e => e.key === 'Enter' && send(input)} />
         <button className="send" disabled={busy || !input.trim()} onClick={() => send(input)}>Senden</button>
-      </div>
-      {!SR && <div className="sub pad">Spracheingabe gibt es in diesem Browser nicht. Bitte Chrome nutzen.</div>}
+      </div>}
+      {!SR && !notesOpen && <div className="sub pad">Spracheingabe gibt es in diesem Browser nicht. Bitte Chrome nutzen.</div>}
     </div>
   )
 }

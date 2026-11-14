@@ -70,7 +70,7 @@ export default function Rooms({ bottles, rooms, locations, reload }) {
 
   /* ----- Ort ----- */
   function openLoc(l) {
-    setLocEdit(cur => (cur?.id === l.id ? null : { id: l.id, name: l.name, roomId: l.room_id, del: false, moveTo: '' }))
+    setLocEdit(cur => (cur?.id === l.id ? null : { id: l.id, name: l.name, roomId: l.room_id, del: false, moveTo: '', defStatus: l.default_status || 'closed' }))
   }
   function onTargetRoom(roomId) {
     const l = locations.find(x => x.id === locEdit.id)
@@ -84,7 +84,9 @@ export default function Rooms({ bottles, rooms, locations, reload }) {
     const clash = locations.some(x => x.room_id === locEdit.roomId && x.id !== l.id && x.name.trim().toLowerCase() === name.toLowerCase())
     if (clash) return setMsg(`„${name}“ gibt es in diesem Raum schon. Bitte einen anderen Namen wählen.`)
     await run(async () => {
-      must(await supabase.from('locations').update({ name, room_id: locEdit.roomId }).eq('id', l.id))
+      const upd = { name, room_id: locEdit.roomId }
+      if (locEdit.defStatus !== (l.default_status || 'closed')) upd.default_status = locEdit.defStatus
+      must(await supabase.from('locations').update(upd).eq('id', l.id))
       if (locEdit.roomId !== l.room_id) must(await supabase.from('bottles').update({ room_id: locEdit.roomId }).eq('location_id', l.id))
       setLocEdit(null)
       if (locEdit.roomId !== l.room_id) setInfo(`„${l.name}“ ist jetzt „${name}“ im Raum ${roomById[locEdit.roomId]?.name}. Die Flaschen sind mitgezogen.`)
@@ -221,6 +223,12 @@ export default function Rooms({ bottles, rooms, locations, reload }) {
                   <div className="fld"><span>Raum</span>
                     <select value={locEdit.roomId} onChange={e => onTargetRoom(e.target.value)}>
                       {rooms.map(x => <option key={x.id} value={x.id}>{x.name}</option>)}
+                    </select>
+                  </div>
+                  <div className="fld"><span>Neue Flaschen hier</span>
+                    <select value={locEdit.defStatus} onChange={e => setLocEdit({ ...locEdit, defStatus: e.target.value })}>
+                      <option value="closed">sind geschlossen (Standard)</option>
+                      <option value="open">sind offen</option>
                     </select>
                   </div>
                   {moving && <p className="hint">Alle {nLoc} Einträge dieses Ortes ziehen mit um. Bei doppeltem Namen wurde die nächste freie Nummer vorgeschlagen, du kannst sie ändern.</p>}

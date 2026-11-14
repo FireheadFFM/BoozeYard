@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { supabase } from './supabase'
 import {
-  SIZES, STATUS, BUCKET, lsGet, lsSet, abvLabel,
+  SIZES, STATUS, BUCKET, APP_VERSION, fetchAll, lsGet, lsSet, abvLabel,
   digitsOnly, codeVariants, codeWarning, lookupBarcode, resizeImage, blobToBase64,
 } from './utils'
 import Rooms from './Rooms'
@@ -75,7 +75,7 @@ function Shell({ children, onLogout }) {
           <div className="logo-icon"><BackbarLogo /></div>
           <div className="logo-text">
             <h1>BoozeYard</h1>
-            <p>Spirits Inventory</p>
+            <p>Spirits Inventory · {APP_VERSION}</p>
           </div>
         </div>
         {onLogout && <WakeToggle />}
@@ -149,6 +149,7 @@ async function resolveCode(raw, bottles, cats) {
       size_ml: b.size_ml, country: b.country, region: b.region, vintage: b.vintage,
       is_collection: b.is_collection, min_stock: b.min_stock,
       note: `Schon im Bestand (${total}×) – Daten übernommen. Bitte Anzahl und Ort prüfen.`,
+      _dupId: (own.find(x => x.status === 'closed') || {}).id || null,
     }
   } else {
     const mains = cats.filter(c => !c.parent_id)
@@ -178,6 +179,8 @@ function Main({ userId, onLogout }) {
   const [series, setSeries] = useState({ roomId: '', locId: '' })
   const [wishlist, setWishlist] = useState([])
   const [scanView, setScanView] = useState(null)
+  const [dup, setDup] = useState(null)       // { data, id } – gescannte Flasche ist schon geschlossen im Bestand
+  const [dupMsg, setDupMsg] = useState('')
 
   async function loadThumbs(rows) {
     const paths = rows.map(b => b.image_thumb).filter(Boolean)
@@ -190,12 +193,12 @@ function Main({ userId, onLogout }) {
 
   async function loadAll() {
     const [b, r, l, c, lv, wl] = await Promise.all([
-      supabase.from('bottles').select('*').order('brand').order('name'),
+      fetchAll(() => supabase.from('bottles').select('*').order('brand').order('name').order('id')),
       supabase.from('rooms').select('*').order('sort_order').order('name'),
-      supabase.from('locations').select('*').order('name'),
+      fetchAll(() => supabase.from('locations').select('*').order('name').order('id')),
       supabase.from('categories').select('*').order('sort_order'),
-      supabase.from('lookup_values').select('*').order('name'),
-      supabase.from('wishlist').select('*').order('created_at'),
+      fetchAll(() => supabase.from('lookup_values').select('*').order('name').order('id')),
+      fetchAll(() => supabase.from('wishlist').select('*').order('created_at').order('id')),
     ])
     const err = b.error || r.error || l.error || c.error
     if (err) {
@@ -219,6 +222,27 @@ function Main({ userId, onLogout }) {
   async function handleCode(raw) {
     const data = await resolveCode(raw, bottles, cats)
     if (!data) return
+    setDupMsg('')
+    if (data._dupId) { setDup({ data, id: data._dupId }); return }
+    setPrefill(p => ({ key: p.key + 1, data }))
+    setEditId(null)
+    setTab('add')
+  }
+
+  // Schon geschlossen im Bestand: Anzahl um 1 erhöhen
+  async function addOne() {
+    const b = bottles.find(x => x.id === dup.id)
+    if (!b) { setDup(null); return }
+    const { error: e1 } = await supabase.from('bottles').update({ quantity: b.quantity + 1 }).eq('id', b.id)
+    if (e1) { setDup(null); return setError('Fehler: ' + e1.message) }
+    await supabase.from('movements').insert({ bottle_id: b.id, type: 'adjustment', quantity: 1, notes: 'Per Scan hinzugefügt' })
+    setDupMsg(`${b.brand} ${b.name}: jetzt ${b.quantity + 1}× geschlossen.`)
+    setDup(null)
+    loadAll()
+  }
+  function newFromDup() {
+    const { _dupId, ...data } = dup.data
+    setDup(null)
     setPrefill(p => ({ key: p.key + 1, data }))
     setEditId(null)
     setTab('add')
@@ -257,7 +281,7 @@ function Main({ userId, onLogout }) {
     <Shell onLogout={onLogout}>
       <nav>
         {tabs.map(([id, label]) => (
-          <button key={id} onClick={() => { setTab(id); setEditId(null); setScanView(null); if (id === 'bottles' || id === 'rooms') setSeries({ roomId: '', locId: '' }) }} className={tab === id ? 'active' : ''}>{label}</button>
+          <button key={id} onClick={() => { setTab(id); setEditId(null); setScanView(null); setDup(null); setDupMsg(''); if (id === 'bottles' || id === 'rooms') setSeries({ roomId: '', locId: '' }) }} className={tab === id ? 'active' : ''}>{label}</button>
         ))}
       </nav>
       <main>
@@ -276,6 +300,23 @@ function Main({ userId, onLogout }) {
         )}
         {tab === 'scanner' && scanView !== 'deliv' && (
           <>
+            {dupMsg && <div className="msg">{dupMsg}</div>}
+            {dup && (() => {
+              const b = bottles.find(x => x.id === dup.id)
+              if (!b) return null
+              const place = [rooms.find(r => r.id === b.room_id)?.name, locations.find(l => l.id === b.location_id)?.name].filter(Boolean).join(' › ')
+              return (
+                <div className="card column dup-box">
+                  <h3>Schon im Bestand</h3>
+                  <p>{b.brand} {b.name} · {b.quantity}× geschlossen{place ? ` · ${place}` : ''}</p>
+                  <div className="row-btns">
+                    <button className="scan-btn" onClick={addOne}>+1 zu diesem Eintrag</button>
+                    <button className="scan-btn secondary" onClick={newFromDup}>Als neuen Eintrag anlegen</button>
+                  </div>
+                  <button className="ghost-btn" onClick={() => setDup(null)}>Abbrechen</button>
+                </div>
+              )
+            })()}
             <Scanner onCode={handleCode} onLabel={handleLabel} />
             <div className="card column deliv-entry">
               <h3>Lieferschein oder Rechnung</h3>
@@ -298,7 +339,7 @@ function Main({ userId, onLogout }) {
         {!loading && tab === 'add' && (
           <BottleForm key={prefill.key} userId={userId} prefill={prefill.data} cats={cats} rooms={rooms}
             locations={locations} lookups={lookups} bottles={bottles} reload={loadAll}
-            series={series} onSeries={(roomId, locId) => setSeries({ roomId, locId })}
+            series={series} onSeries={(roomId, locId, extra) => setSeries({ roomId, locId, ...(extra || {}) })}
             onFinish={() => { setSeries({ roomId: '', locId: '' }); setTab('bottles') }} />
         )}
       </main>
@@ -326,6 +367,8 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit })
   const [mvLoc, setMvLoc] = useState('')
   const [mvBusy, setMvBusy] = useState(false)
   const [moved, setMoved] = useState('')
+  const [limit, setLimit] = useState(60)
+  useEffect(() => { setLimit(60) }, [q, catId, status, roomId, locId])
 
   const catById = useMemo(() => Object.fromEntries(cats.map(c => [c.id, c])), [cats])
   const roomById = useMemo(() => Object.fromEntries(rooms.map(r => [r.id, r])), [rooms])
@@ -525,7 +568,7 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit })
         <div className="sel-bar">
           <div className="sel-count">{sel.size} ausgewählt</div>
           <div className="sel-btns">
-            <button type="button" onClick={() => setSel(new Set(filtered.map(b => b.id)))}>Alle {filtered.length} sichtbaren</button>
+            <button type="button" onClick={() => setSel(new Set(filtered.map(b => b.id)))}>Alle {filtered.length} gefilterten</button>
             <button type="button" disabled={sel.size === 0} onClick={() => setSel(new Set())}>Keine</button>
             <button type="button" className="primary" disabled={sel.size === 0} onClick={() => setMvOpen(v => !v)}>Verschieben…</button>
           </div>
@@ -555,7 +598,7 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit })
         <div className="empty">{bottles.length === 0 ? 'Noch keine Flaschen eingetragen.' : 'Keine Treffer für diese Filter.'}</div>
       )}
 
-      {filtered.map(b => {
+      {filtered.slice(0, limit).map(b => {
         const sub = catById[b.category_id]
         const main = mainOf(b)
         const label = abvLabel(b.abv)
@@ -619,6 +662,11 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit })
           </div>
         )
       })}
+      {filtered.length > limit && (
+        <button type="button" className="scan-btn secondary more-btn" onClick={() => setLimit(l => l + 60)}>
+          Mehr anzeigen ({filtered.length - limit} weitere)
+        </button>
+      )}
     </>
   )
 }
@@ -716,6 +764,7 @@ function Scanner({ onCode, onLabel, compact = false, autoStart = false, onClose 
     setBusy(true)
     setInfo(`Code ${code} erkannt – suche Produktdaten…`)
     await onCode(code)
+    setInfo('')
     setBusy(false)
   }
 
@@ -1109,7 +1158,18 @@ function ImageSlot({ label, url, onPick, onRemove, onZoom }) {
 function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, bottles = [], reload, onDone, series, onSeries, onFinish }) {
   const edit = !!bottle
   const mains = cats.filter(c => !c.parent_id)
-  const [f, setF] = useState(() => initialForm(bottle, prefill, cats, series))
+  const touchedRef = useRef(!!series?.touched)
+  const [f, setF] = useState(() => {
+    const base = initialForm(bottle, prefill, cats, series)
+    if (!bottle) {
+      if (series?.touched) { base.status = series.status || base.status; base.fill_percent = series.fill ?? base.fill_percent }
+      else {
+        const l = locations.find(x => x.id === base.locId)
+        if (l?.default_status === 'open') base.status = 'open'
+      }
+    }
+    return base
+  })
   const [msg, setMsg] = useState(prefill?.note || '')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
@@ -1377,7 +1437,7 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
       let imageProblem = ''
       try { await syncImages(data.id) } catch (e) { imageProblem = ' Die Bilder konnten nicht hochgeladen werden: ' + e.message }
 
-      onSeries && onSeries(roomId, locationId || '')
+      onSeries && onSeries(roomId, locationId || '', { touched: touchedRef.current, status: f.status, fill: f.fill_percent })
       setDone({ title: `${row.brand} ${row.name}`, roomId, locId: locationId || '', imageProblem })
       reload()
     } catch (e) {
@@ -1506,13 +1566,13 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
       <input placeholder="Jahrgang (optional)" value={f.vintage} onChange={e => set('vintage', e.target.value)} />
 
       <div className="two">
-        <select value={f.status} onChange={e => set('status', e.target.value)}>
+        <select value={f.status} onChange={e => { touchedRef.current = true; set('status', e.target.value) }}>
           {Object.entries(STATUS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
         </select>
         <input type="number" min={edit ? 0 : 1} placeholder="Anzahl" value={f.quantity} onChange={e => set('quantity', e.target.value)} />
       </div>
       {f.status === 'open' && (
-        <select value={f.fill_percent} onChange={e => set('fill_percent', e.target.value)}>
+        <select value={f.fill_percent} onChange={e => { touchedRef.current = true; set('fill_percent', e.target.value) }}>
           {[100, 90, 75, 50, 25, 10].map(v => <option key={v} value={v}>Füllstand {v} %</option>)}
         </select>
       )}
@@ -1525,7 +1585,17 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
       {f.roomId === '__new' && <input placeholder="Name des neuen Raums" value={f.newRoom} onChange={e => set('newRoom', e.target.value)} />}
 
       {f.roomId && (
-        <select value={locValid || f.locId === '__new' ? f.locId : ''} onChange={e => set('locId', e.target.value)}>
+        <select value={locValid || f.locId === '__new' ? f.locId : ''} onChange={e => {
+          const v = e.target.value
+          setF(prev => {
+            const next = { ...prev, locId: v }
+            if (!edit && !touchedRef.current) {
+              const l = locations.find(x => x.id === v)
+              if (l) next.status = l.default_status === 'open' ? 'open' : 'closed'
+            }
+            return next
+          })
+        }}>
           <option value="">{roomLocs.length > 0 ? 'Ort wählen *' : '– kein Ort –'}</option>
           {roomLocs.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
           <option value="__new">+ Neuer Ort…</option>

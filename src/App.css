@@ -293,3 +293,7 @@ video { width: 100%; border-radius: 8px; margin-top: 14px; border: 1px solid #3a
 .note-add { display: flex; gap: 8px; }
 .note-add input { flex: 1; min-width: 0; padding: 10px 12px; border-radius: 10px; border: 1px solid #3a2810; background: #1a0f05; color: #f0e6d3; font-family: inherit; font-size: 14px; outline: none; }
 a.shown-item { text-decoration: none; }
+.more-btn { width: 100%; margin: 6px 0 14px; }
+.dup-box { border-color: #c8891a; }
+.dup-box h3 { font-family: 'Cinzel', serif; font-weight: 400; color: #f0c96a; font-size: 15px; }
+.dup-box p { font-size: 13px; color: #b09060; }
