@@ -358,3 +358,7 @@ a.shown-item { text-decoration: none; }
 .ask-reserve { display: flex; flex-direction: column; gap: 6px; }
 .ask-reserve button { text-align: left; padding: 10px 12px; background: #2a1a08; border: 1px solid #4a3018; border-radius: 8px; color: #f0e6d3; font-family: inherit; font-size: 13px; cursor: pointer; }
 .ask-reserve button:hover { border-color: #c8891a; }
+
+/* Chat: Quellenangaben der Websuche (U19) */
+.sources { font-size: 11px; color: #8a7050; margin-top: 8px; line-height: 1.5; }
+.sources a { color: #c8a96a; margin-left: 6px; text-decoration: underline; }

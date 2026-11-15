@@ -6,6 +6,14 @@ const SR = typeof window !== 'undefined' ? (window.SpeechRecognition || window.w
 const HINTS = ['Wie viele trockenen Wermut habe ich noch?', 'Welchen Rye über 45 % habe ich da?', 'Habe ich noch Cynar offen?', 'Der Cynar ist leer.', 'Setz Rittenhouse Rye auf die Einkaufsliste.', 'Was kann ich aus meinen Videos mixen?']
 
 const RATES = [1, 1.2, 1.4, 1.6, 1.8]
+// Lange Antworten (Listen) nicht komplett vorlesen: nur der Anfang, der Rest steht im Chat
+const briefSpeech = t => {
+  const s = String(t || '')
+  if (s.length <= 450) return s
+  const first = s.split('\n').map(x => x.trim()).filter(Boolean)[0] || ''
+  const intro = first.length > 0 && first.length <= 300 && !/^\d+[.)]/.test(first) ? first : 'Die Antwort ist länger.'
+  return `${intro} Den Rest siehst du im Chat.`
+}
 const speakable = t => String(t || '').replace(/[*_`#>]/g, '').replace(/\s+/g, ' ').trim()
 
 async function callFn(body) {
@@ -138,9 +146,9 @@ export default function Chat({ hidden, onOpenBottle, reload }) {
     setBusy(true)
     try {
       const d = await callFn({ messages: history(next), ...(heard && heard.length ? { heard } : {}) })
-      const reply = { id: Date.now() + 'a', role: 'assistant', text: d.reply || '', shown: d.shown || [], recipes: d.recipes || [], choices: d.choices || [], proposal: d.proposal || null }
+      const reply = { id: Date.now() + 'a', role: 'assistant', text: d.reply || '', shown: d.shown || [], recipes: d.recipes || [], sources: d.sources || [], choices: d.choices || [], proposal: d.proposal || null }
       setMsgs(m => [...m, reply])
-      speak(d.reply)
+      speak(briefSpeech(d.reply))
     } catch (e) {
       setMsgs(m => [...m, { id: Date.now() + 'e', role: 'assistant', text: '', error: e.message }])
     }
@@ -286,6 +294,14 @@ export default function Chat({ hidden, onOpenBottle, reload }) {
                     <b>{r.name}</b>
                     <small>Rezept im Video öffnen</small>
                   </a>
+                ))}
+              </div>
+            )}
+
+            {m.sources?.length > 0 && (
+              <div className="sources">
+                Quellen: {m.sources.map((s, i) => (
+                  <a key={s.url} href={s.url} target="_blank" rel="noopener noreferrer">{s.title}{i < m.sources.length - 1 ? ',' : ''}</a>
                 ))}
               </div>
             )}
