@@ -176,6 +176,7 @@ function Main({ userId, onLogout }) {
   const [cats, setCats] = useState([])
   const [lookups, setLookups] = useState([])
   const [thumbs, setThumbs] = useState({})
+  const [lastIn, setLastIn] = useState({})   // Flaschen-ID -> Zeitpunkt der letzten Zugangsbuchung
   const [prefill, setPrefill] = useState({ key: 0, data: null })
   const [editId, setEditId] = useState(null)
   const [series, setSeries] = useState({ roomId: '', locId: '' })
@@ -215,8 +216,21 @@ function Main({ userId, onLogout }) {
       setLookups(lv.data || [])
       setWishlist(wl.error ? [] : (wl.data || []))
       loadThumbs(b.data)
+      loadLastIn()
     }
     setLoading(false)
+  }
+
+  // Letzte Zugangsbuchung je Flasche (für die Sortierung "Zuletzt erfasst"); lädt im Hintergrund nach
+  async function loadLastIn() {
+    const res = await fetchAll(() => supabase.from('movements').select('bottle_id,moved_at,notes').gt('quantity', 0).order('moved_at', { ascending: false }).order('id'))
+    if (res.error) return
+    const map = {}
+    for (const m of res.data || []) {
+      if (m.notes === 'Öffnen rückgängig' || m.notes === 'Leer rückgängig') continue
+      if (!map[m.bottle_id] || m.moved_at > map[m.bottle_id]) map[m.bottle_id] = m.moved_at
+    }
+    setLastIn(map)
   }
 
   useEffect(() => { loadAll() }, [])
@@ -300,7 +314,7 @@ function Main({ userId, onLogout }) {
         {error && <div className="msg error">{error}</div>}
         {loading && <div className="empty">Lädt…</div>}
         {!loading && tab === 'bottles' && !editing && (
-          <BottleList bottles={bottles} cats={cats} rooms={rooms} locations={locations} thumbs={thumbs}
+          <BottleList bottles={bottles} cats={cats} rooms={rooms} locations={locations} thumbs={thumbs} lastIn={lastIn}
             reload={loadAll} onEdit={id => setEditId(id)} />
         )}
         {!loading && tab === 'bottles' && editing && (
@@ -381,7 +395,7 @@ function Main({ userId, onLogout }) {
 
 const eurFmt = n => Number(n).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })
 
-function BottleInfo({ b, thumb, place, cat, group, onClose, onEdit, onGallery }) {
+function BottleInfo({ b, thumb, place, cat, group, lastIn, onClose, onEdit, onGallery }) {
   const label = abvLabel(b.abv)
   const rows = [
     ['Kategorie', cat],
@@ -396,6 +410,7 @@ function BottleInfo({ b, thumb, place, cat, group, onClose, onEdit, onGallery })
     ['Mindestbestand', b.min_stock ? String(b.min_stock) : ''],
     ['Barcode', b.barcode],
     ['Erfasst', b.created_at ? new Date(b.created_at).toLocaleDateString('de-DE') : ''],
+    ['Zuletzt hinzugekommen', lastIn ? new Date(lastIn).toLocaleDateString('de-DE') : ''],
   ].filter(r => r[1])
   return (
     <div className="info-back" onClick={onClose}>
@@ -438,7 +453,7 @@ function BottleInfo({ b, thumb, place, cat, group, onClose, onEdit, onGallery })
 
 /* ---------- Bestandsliste mit Suche und Filtern ---------- */
 
-function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit }) {
+function BottleList({ bottles, cats, rooms, locations, thumbs, lastIn = {}, reload, onEdit }) {
   const [q, setQ] = useState('')
   const [catId, setCatId] = useState('')
   const [status, setStatus] = useState('')
@@ -456,8 +471,9 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit })
   const [moved, setMoved] = useState('')
   const [limit, setLimit] = useState(60)
   const [infoId, setInfoId] = useState(null)
+  const [sortBy, setSortBy] = useState(() => (lsGet('sort') === 'recent' ? 'recent' : 'name'))
   const [emptyAsk, setEmptyAsk] = useState(null)
-  useEffect(() => { setLimit(60) }, [q, catId, status, roomId, locId])
+  useEffect(() => { setLimit(60) }, [q, catId, status, roomId, locId, sortBy])
 
   const catById = useMemo(() => Object.fromEntries(cats.map(c => [c.id, c])), [cats])
   const roomById = useMemo(() => Object.fromEntries(rooms.map(r => [r.id, r])), [rooms])
@@ -495,7 +511,7 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit })
 
   const filtered = useMemo(() => {
     const terms = q.toLowerCase().split(/\s+/).filter(Boolean)
-    return bottles.filter(b => {
+    const list = bottles.filter(b => {
       const sub = catById[b.category_id]
       const main = mainOf(b)
       if (catId && main?.id !== catId) return false
@@ -510,7 +526,10 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit })
       }
       return true
     })
-  }, [bottles, q, catId, status, roomId, locId, catById, roomById, locById])
+    // Zuletzt erfasst: neueste Zugangsbuchung zuerst, Flaschen ohne Buchung ans Ende (stabil nach Name)
+    if (sortBy === 'recent') list.sort((x, y) => (lastIn[y.id] || '').localeCompare(lastIn[x.id] || ''))
+    return list
+  }, [bottles, q, catId, status, roomId, locId, catById, roomById, locById, sortBy, lastIn])
 
   const total = filtered.reduce((s, b) => s + (b.status === 'empty' ? 0 : b.quantity), 0)
   const roomLocs = locations.filter(l => l.room_id === roomId)
@@ -660,6 +679,12 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit })
             {roomLocs.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
           </select>
         </div>
+        <div className="filter-row">
+          <select value={sortBy} onChange={e => { setSortBy(e.target.value); lsSet('sort', e.target.value) }} aria-label="Sortierung">
+            <option value="name">Sortierung: Name (A–Z)</option>
+            <option value="recent">Sortierung: Zuletzt erfasst</option>
+          </select>
+        </div>
         <div className="count">{filtered.length} Einträge · {total} Flaschen</div>
         <div className="sel-toggle">
           {!selMode && <button type="button" className="ghost" onClick={() => { setSelMode(true); setMoved('') }}>Mehrere auswählen</button>}
@@ -737,7 +762,7 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit })
           <BottleInfo b={ib} thumb={ib.image_thumb ? thumbs[ib.image_thumb] : null}
             place={[roomById[ib.room_id]?.name, locById[ib.location_id]?.name].filter(Boolean).join(' › ')}
             cat={[main?.name, sub && sub.id !== main?.id ? sub.name : null].filter(Boolean).join(' · ')}
-            group={groups.get(productKey(ib))}
+            group={groups.get(productKey(ib))} lastIn={lastIn[ib.id]}
             onClose={() => setInfoId(null)} onEdit={() => { setInfoId(null); onEdit(ib.id) }}
             onGallery={() => openGallery(ib)} />
         )
