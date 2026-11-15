@@ -2,9 +2,11 @@ import { useState, useEffect, useMemo, useRef } from 'react'
 import { supabase } from './supabase'
 import {
   SIZES, STATUS, BUCKET, APP_VERSION, fetchAll, lsGet, lsSet, abvLabel,
-  digitsOnly, codeVariants, codeWarning, lookupBarcode, resizeImage, blobToBase64,
+  digitsOnly, codeVariants, codeWarning, lookupBarcode, resizeImage,
   productKey, stockGroups,
 } from './utils'
+import { createDetector, decodeFromFile, runAnalyze, ensureLookup, aiToPrefill, ensureRoom, ensureLocation } from './shared'
+import Schnell from './Schnell'
 import Chat from './Chat'
 import Einkauf from './Einkauf'
 import Lieferung from './Lieferung'
@@ -331,6 +333,11 @@ function Main({ userId, onLogout }) {
             )}
             <Scanner onCode={handleCode} onLabel={handleLabel} onManual={manualEntry} />
             <div className="card column deliv-entry">
+              <h3>Foto-Schnellerfassung</h3>
+              <p>Raum, Ort und Status einmal vorgeben, dann pro Flasche Front und Rück fotografieren.</p>
+              <button className="scan-btn secondary" style={{ marginTop: 0 }} onClick={() => setCapView('quick')}>Schnellerfassung starten</button>
+            </div>
+            <div className="card column deliv-entry">
               <h3>Lieferschein oder Rechnung</h3>
               <p>Beleg als Foto oder PDF einlesen, die KI erfasst alle Positionen auf einmal.</p>
               <button className="scan-btn secondary" style={{ marginTop: 0 }} onClick={() => setCapView('deliv')}>Beleg erfassen</button>
@@ -341,6 +348,13 @@ function Main({ userId, onLogout }) {
           <>
             <button className="link-back" onClick={() => setCapView(null)}>← Zurück zur Erfassung</button>
             <Lieferung bottles={bottles} cats={cats} rooms={rooms} locations={locations} lookups={lookups}
+              reload={loadAll} onDone={() => { setCapView(null); setTab('bottles') }} />
+          </>
+        )}
+        {!loading && tab === 'capture' && capView === 'quick' && (
+          <>
+            <button className="link-back" onClick={() => setCapView(null)}>← Zurück zur Erfassung</button>
+            <Schnell userId={userId} bottles={bottles} cats={cats} rooms={rooms} locations={locations} lookups={lookups}
               reload={loadAll} onDone={() => { setCapView(null); setTab('bottles') }} />
           </>
         )}
@@ -441,6 +455,7 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit })
   const [moved, setMoved] = useState('')
   const [limit, setLimit] = useState(60)
   const [infoId, setInfoId] = useState(null)
+  const [emptyAsk, setEmptyAsk] = useState(null)
   useEffect(() => { setLimit(60) }, [q, catId, status, roomId, locId])
 
   const catById = useMemo(() => Object.fromEntries(cats.map(c => [c.id, c])), [cats])
@@ -549,11 +564,26 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit })
     reload()
   }
 
-  async function markEmpty(b) {
+  // Leer-Knopf: steht das Produkt nicht ohnehin auf der Einkaufsliste, kommt erst die Nachkauf-Frage
+  function askEmpty(b) {
+    const g = groups.get(productKey(b))
+    if (g && (g.low || g.reorder)) {
+      markEmpty(b, false)
+      setMsg('Als leer markiert. Das Produkt steht schon auf der Einkaufsliste.')
+      return
+    }
+    setEmptyAsk(b)
+  }
+
+  async function markEmpty(b, reorder) {
     setMsg('')
-    const { error } = await supabase.from('bottles').update({ status: 'empty', fill_percent: 0 }).eq('id', b.id)
+    setEmptyAsk(null)
+    const upd = { status: 'empty', fill_percent: 0 }
+    if (reorder) upd.reorder = true
+    const { error } = await supabase.from('bottles').update(upd).eq('id', b.id)
     if (error) return fail(error)
     await supabase.from('movements').insert({ bottle_id: b.id, type: 'empty', quantity: -1 })
+    if (reorder) setMsg('Als leer markiert und auf die Einkaufsliste gesetzt.')
     reload()
   }
 
@@ -636,7 +666,7 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit })
         </div>
       </div>
 
-      {msg && <div className="msg error">{msg}</div>}
+      {msg && <div className={'msg' + (msg.startsWith('Fehler') ? ' error' : '')}>{msg}</div>}
       {moved && !selMode && <div className="msg">{moved}</div>}
       {selMode && (
         <div className="sel-bar">
@@ -666,6 +696,36 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit })
           )}
         </div>
       )}
+      {emptyAsk && (() => {
+        const eb = emptyAsk
+        const g = groups.get(productKey(eb))
+        const reserve = (g ? g.entries : []).filter(x => x.id !== eb.id && x.status !== 'empty')
+          .sort((x, y) => (x.status === 'closed' ? 0 : 1) - (y.status === 'closed' ? 0 : 1))
+        const placeOf = x => [roomById[x.room_id]?.name, locById[x.location_id]?.name].filter(Boolean).join(' › ') || 'ohne Ort'
+        return (
+          <div className="ask-back" onClick={() => setEmptyAsk(null)}>
+            <div className="ask-card" onClick={e => e.stopPropagation()}>
+              <h3>Nachkaufen?</h3>
+              <p><b>{eb.brand} {eb.name}</b> wird als leer markiert. Soll es auf die Einkaufsliste?</p>
+              {reserve.length > 0
+                ? (
+                  <div className="ask-reserve">
+                    <div className="count">Noch vorhanden – antippen zeigt Details</div>
+                    {reserve.map(x => (
+                      <button type="button" key={x.id} onClick={() => setInfoId(x.id)}>
+                        {x.quantity}× {x.status === 'closed' ? 'geschlossen' : `offen (${x.fill_percent} %)`} · {placeOf(x)}
+                      </button>
+                    ))}
+                  </div>
+                )
+                : <div className="hint need-t">Keine weitere Flasche dieses Produkts im Bestand.</div>}
+              <button className="save-btn" onClick={() => markEmpty(eb, true)}>Ja, auf die Einkaufsliste</button>
+              <button className="ghost-btn" style={{ marginTop: 0 }} onClick={() => markEmpty(eb, false)}>Nein, nur leer markieren</button>
+              <button className="link-back" onClick={() => setEmptyAsk(null)}>Abbrechen</button>
+            </div>
+          </div>
+        )
+      })()}
       {gallery && <Lightbox images={gallery.images} onClose={() => setGallery(null)} />}
       {(() => {
         const ib = infoId ? bottles.find(x => x.id === infoId) : null
@@ -735,7 +795,7 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit })
             {delId !== b.id && !selMode && (
               <div className="actions full">
                 {b.status === 'closed' && <button onClick={() => openOne(b)}>Öffnen</button>}
-                {b.status === 'open' && <button onClick={() => markEmpty(b)}>Leer</button>}
+                {b.status === 'open' && <button onClick={() => askEmpty(b)}>Leer</button>}
                 {b.status === 'open' && <button className="ghost" onClick={() => undoOpen(b)}>Zurück</button>}
                 {b.status === 'empty' && <button className="ghost" onClick={() => undoEmpty(b)}>Zurück</button>}
                 <button className="ghost" onClick={() => onEdit(b.id)}>Bearbeiten</button>
@@ -767,54 +827,6 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit })
 /* ---------- Lagerorte ---------- */
 
 /* ---------- Scanner ---------- */
-
-const FORMATS = ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128']
-
-async function createDetector(preferWasm) {
-  if (!preferWasm && 'BarcodeDetector' in window) {
-    try {
-      const sup = await window.BarcodeDetector.getSupportedFormats()
-      const formats = FORMATS.filter(f => sup.includes(f))
-      if (formats.length > 0) return { detector: new window.BarcodeDetector({ formats }), wasm: false }
-    } catch { /* weiter mit Ersatz */ }
-  }
-  const { BarcodeDetector } = await import('barcode-detector/ponyfill')
-  return { detector: new BarcodeDetector({ formats: FORMATS }), wasm: true }
-}
-
-// Barcode aus einem Foto lesen: mehrere Versuche mit Größen, Drehungen und Kontrast
-async function decodeFromFile(file) {
-  let bmp
-  try { bmp = await createImageBitmap(file, { imageOrientation: 'from-image' }) } catch { bmp = await createImageBitmap(file) }
-  const make = (maxSide, rot, enhance) => {
-    const scale = Math.min(1, maxSide / Math.max(bmp.width, bmp.height))
-    const w = Math.round(bmp.width * scale)
-    const h = Math.round(bmp.height * scale)
-    const c = document.createElement('canvas')
-    const swap = rot === 90 || rot === 270
-    c.width = swap ? h : w
-    c.height = swap ? w : h
-    const ctx = c.getContext('2d')
-    if (enhance) ctx.filter = 'grayscale(1) contrast(1.6)'
-    ctx.translate(c.width / 2, c.height / 2)
-    ctx.rotate((rot * Math.PI) / 180)
-    ctx.drawImage(bmp, -w / 2, -h / 2, w, h)
-    return c
-  }
-  const attempts = [[2400, 0, false], [1400, 0, false], [1400, 0, true], [2400, 90, false], [2400, 270, false], [1000, 0, true]]
-  for (const wasm of [false, true]) {
-    let detector
-    try { detector = (await createDetector(wasm)).detector } catch { continue }
-    for (const [side, rot, enh] of attempts) {
-      try {
-        const found = await detector.detect(make(side, rot, enh))
-        if (found.length > 0 && found[0].rawValue) { bmp.close && bmp.close(); return found[0].rawValue }
-      } catch { /* nächster Versuch */ }
-    }
-  }
-  bmp.close && bmp.close()
-  return null
-}
 
 const camIsFront = d => /front|user|selfie|vorn/i.test(d.label || '')
 
@@ -1102,90 +1114,9 @@ function Scanner({ onCode, onLabel, onManual, compact = false, autoStart = false
 
 /* ---------- KI-Auswertung (gemeinsam für Formular und Erfassen-Tab) ---------- */
 
-const sameText = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase()
-
-async function runAnalyze(files, cats, lookups) {
-  const mains = cats.filter(c => !c.parent_id)
-  const images = []
-  for (const file of files) {
-    const blob = await resizeImage(file, 1200, 0.8)
-    images.push({ media_type: 'image/jpeg', data: await blobToBase64(blob) })
-  }
-  const taxonomy = {
-    categories: Object.fromEntries(mains.map(c => [c.name, cats.filter(x => x.parent_id === c.id).map(x => x.name)])),
-    countries: lookups.filter(l => l.kind === 'country').map(l => l.name),
-    regions: [...new Set(lookups.filter(l => l.kind === 'region').map(l => l.name))],
-  }
-  const { data, error: fnError } = await supabase.functions.invoke('analyze-label', { body: { images, taxonomy } })
-  if (fnError) {
-    let detail = fnError.message
-    try { const j = await fnError.context.json(); if (j?.error) detail = j.error } catch { /* ignorieren */ }
-    throw new Error(detail)
-  }
-  if (data?.error) throw new Error(data.error)
-  if (!data?.result) throw new Error('Keine Antwort erhalten')
-  return data.result
-}
 
 // KI-Ergebnis in Vorbelegungs-Daten für das Formular umwandeln
-function aiToPrefill(r, cats, lookups) {
-  const mains = cats.filter(c => !c.parent_id)
-  const data = {}
-  const filled = []
-  if (r.brand) { data.brand = r.brand; filled.push('Marke') }
-  if (r.name) { data.name = r.name; filled.push('Name') }
-  const m = r.main_category ? mains.find(c => sameText(c.name, r.main_category)) : null
-  if (m) {
-    const sub = r.sub_category ? cats.find(c => c.parent_id === m.id && sameText(c.name, r.sub_category)) : null
-    data.category_id = sub ? sub.id : m.id
-    filled.push(sub ? 'Kategorie und Subkategorie' : 'Kategorie')
-  }
-  if (r.abv !== null && r.abv !== undefined) { data.abv = r.abv; filled.push('Alkoholgehalt') }
-  if (r.size_ml) { data.size_ml = r.size_ml; filled.push('Größe') }
-  if (r.vintage) { data.vintage = r.vintage; filled.push('Jahrgang') }
-  let country = ''
-  if (r.country) {
-    const known = lookups.find(l => l.kind === 'country' && sameText(l.name, r.country))
-    if (known) { data.country = known.name; country = known.name }
-    else { data.country = '__new'; data.newCountry = r.country; country = r.country }
-    filled.push('Herkunftsland')
-  }
-  if (r.region) {
-    const known = lookups.find(l => l.kind === 'region' && sameText(l.name, r.region) && (!l.country || !country || l.country === country))
-    if (known) data.region = known.name
-    else { data.region = '__new'; data.newRegion = r.region }
-    filled.push('Region / Stil')
-  }
-  if (r.notes) data.noteText = r.notes
-  return { data, filled }
-}
-
 /* ---------- Formular: Flasche anlegen oder bearbeiten ---------- */
-
-async function ensureRoom(rooms, name) {
-  const existing = rooms.find(r => r.name.toLowerCase() === name.toLowerCase())
-  if (existing) return existing.id
-  const { data, error } = await supabase.from('rooms').insert({ name }).select('id').single()
-  if (error) throw error
-  return data.id
-}
-
-async function ensureLocation(locations, roomId, name) {
-  const existing = locations.find(l => l.room_id === roomId && l.name.toLowerCase() === name.toLowerCase())
-  if (existing) return existing.id
-  const { data, error } = await supabase.from('locations').insert({ room_id: roomId, name }).select('id').single()
-  if (error) throw error
-  return data.id
-}
-
-async function ensureLookup(lookups, kind, name, country) {
-  const existing = lookups.find(l => l.kind === kind && l.name.toLowerCase() === name.toLowerCase() &&
-    (kind === 'country' || !l.country || l.country === country))
-  if (existing) return existing.name
-  const { error } = await supabase.from('lookup_values').insert({ kind, name, country: kind === 'region' ? (country || null) : null })
-  if (error) throw error
-  return name
-}
 
 function initialForm(bottle, prefill, cats, series = { roomId: '', locId: '' }) {
   const edit = !!bottle
