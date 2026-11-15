@@ -71,6 +71,59 @@ const brief = (r: any) => ({
   land: r.country, jahrgang: r.vintage, nachkaufen: r.reorder || undefined, notiz: r.notes || undefined,
 });
 
+/* ---------- Kölner Phonetik (für falsch erkannte Produktnamen, z. B. "schöner" statt "Cynar") ---------- */
+
+function kolner(word: string): string {
+  const w = word.toLowerCase().replace(/ä/g, "a").replace(/ö/g, "o").replace(/ü/g, "u").replace(/ß/g, "ss")
+    .replace(/[^a-z]/g, "").replace(/sch/g, "§");
+  const out: string[] = [];
+  for (let i = 0; i < w.length; i++) {
+    const c = w[i], p = w[i - 1] ?? "", n = w[i + 1] ?? "";
+    let code = "";
+    if (c === "§") code = "8";
+    else if ("aeijouy".includes(c)) code = "0";
+    else if (c === "h") code = "";
+    else if (c === "b") code = "1";
+    else if (c === "p") code = n === "h" ? "3" : "1";
+    else if (c === "d" || c === "t") code = "csz§".includes(n) && n !== "" ? "8" : "2";
+    else if ("fvw".includes(c)) code = "3";
+    else if ("gkq".includes(c)) code = "4";
+    else if (c === "c") {
+      if (i === 0) code = n !== "" && "ahkloqrux".includes(n) ? "4" : "8";
+      else code = p !== "" && "sz§".includes(p) ? "8" : (n !== "" && "ahkoqux".includes(n) ? "4" : "8");
+    }
+    else if (c === "x") code = p !== "" && "ckq".includes(p) ? "8" : "48";
+    else if (c === "l") code = "5";
+    else if (c === "m" || c === "n") code = "6";
+    else if (c === "r") code = "7";
+    else if (c === "s" || c === "z") code = "8";
+    out.push(code);
+  }
+  const s = out.join("").replace(/(.)\1+/g, "$1");
+  return s ? s[0] + s.slice(1).replace(/0/g, "") : "";
+}
+
+// Produktgruppen für den Mindestbestand: gleiche Marke, Name, Größe und Alkoholgehalt = ein Produkt
+const gkey = (s: unknown) => String(s ?? "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "");
+function stockGroups(rows: any[]) {
+  const map = new Map<string, any>();
+  for (const r of rows) {
+    const key = `${gkey(r.brand)}|${gkey(r.name)}|${r.size_ml ?? ""}|${r.abv === null || r.abv === undefined ? "" : Number(r.abv)}`;
+    let g = map.get(key);
+    if (!g) { g = { entries: [], closed: 0, open: 0, min: null as number | null }; map.set(key, g); }
+    g.entries.push(r);
+    if (r.status === "closed") g.closed += r.quantity;
+    if (r.status === "open") g.open += r.quantity;
+    if (r.min_stock !== null && r.min_stock !== undefined && (g.min === null || r.min_stock > g.min)) g.min = r.min_stock;
+  }
+  const rank: Record<string, number> = { closed: 0, open: 1, empty: 2 };
+  for (const g of map.values()) {
+    g.rep = [...g.entries].sort((x: any, y: any) => rank[x.status] - rank[y.status])[0];
+    g.low = g.min !== null && g.min > 0 && g.closed < g.min;
+  }
+  return [...map.values()];
+}
+
 /* ---------- Werkzeuge ---------- */
 
 const TOOLS = [
@@ -180,6 +233,7 @@ function searchBottles(rows: any[], a: any) {
   if (typeof a.max_abv === "number") list = list.filter((r) => r.abv !== null && r.abv <= a.max_abv);
   if (a.only_reorder) list = list.filter((r) => r.reorder);
   let fuzzy = false;
+  let phonetic = false;
   if (tokens.length > 0) {
     const scored = list.map((r) => {
       const hay = norm([r.brand, r.name, r.category, r.main_category, r.country, r.region, r.vintage, r.notes, r.abv ? r.abv + "%" : ""].join(" "));
@@ -192,11 +246,22 @@ function searchBottles(rows: any[], a: any) {
       fuzzy = hit.length > 0;
     }
     list = hit.sort((x, y) => y.n - x.n).map((x) => x.r);
+    // Nichts gefunden: klingt ein Suchwort wie ein Wort in Marke oder Name? (Spracherkennung hört Produktnamen oft falsch)
+    if (list.length === 0) {
+      const codes = tokens.map((t) => (t.length >= 3 ? kolner(t) : ""));
+      const phon = scored.map(({ r }) => {
+        const hay = norm([r.brand, r.name, r.category, r.main_category, r.country, r.region].join(" "));
+        const words = norm(`${r.brand} ${r.name}`).split(" ").filter((w) => w.length >= 3).map(kolner);
+        const n = tokens.filter((t, i) => hay.includes(t) || (codes[i].length >= 2 && words.includes(codes[i]))).length;
+        return { r, n };
+      }).filter((x) => x.n === tokens.length);
+      if (phon.length > 0) { list = phon.map((x) => x.r); phonetic = true; }
+    }
   }
   const order: Record<string, number> = { open: 0, closed: 1, empty: 2 };
   list = list.sort((x, y) => (order[x.status] ?? 3) - (order[y.status] ?? 3));
   const limit = Math.min(30, a.limit ?? 20);
-  return { treffer: list.length, ungenau_gesucht: fuzzy || undefined, eintraege: list.slice(0, limit).map(brief) };
+  return { treffer: list.length, ungenau_gesucht: fuzzy || undefined, klingt_aehnlich_gesucht: phonetic || undefined, eintraege: list.slice(0, limit).map(brief) };
 }
 
 /* ---------- Rezepte ---------- */
@@ -227,7 +292,7 @@ function covered(hays: string[], ing: any): "ja" | "unsicher" | "nein" {
 const zutat = (i: any) => `${i.amount_text ? i.amount_text + " " : ""}${i.type}${i.product && norm(i.product) !== norm(i.type) ? ` (${i.product})` : ""}`;
 
 function searchRecipes(recipes: any[], a: any) {
-  if (recipes.length === 0) return { hinweis: "Es sind noch keine Rezepte geladen. Der Benutzer kann sie im Tab Export unter YouTube-Rezepte laden." };
+  if (recipes.length === 0) return { hinweis: "Es sind noch keine Rezepte geladen. Der Benutzer kann sie im Tab Verwaltung unter YouTube-Rezepte laden." };
   const t = toks(a.query);
   const hit = recipes.filter((r) => {
     const hay = nsyn([r.cocktail, r.title, ...(r.ingredients ?? []).map((i: any) => `${i.type} ${i.product ?? ""}`)].join(" "));
@@ -241,7 +306,7 @@ function searchRecipes(recipes: any[], a: any) {
 }
 
 function makeableRecipes(recipes: any[], rows: any[], a: any) {
-  if (recipes.length === 0) return { hinweis: "Es sind noch keine Rezepte geladen. Der Benutzer kann sie im Tab Export unter YouTube-Rezepte laden." };
+  if (recipes.length === 0) return { hinweis: "Es sind noch keine Rezepte geladen. Der Benutzer kann sie im Tab Verwaltung unter YouTube-Rezepte laden." };
   const hays = rows.filter((r) => r.status !== "empty").map(bottleHay);
   const maxMiss = Math.max(0, Math.min(5, Math.round(Number(a.max_missing ?? 0))));
   const must = a.must_include ? toks(a.must_include) : [];
@@ -303,10 +368,11 @@ async function runTool(db: any, data: any, name: string, a: any, ctx: any) {
       return { treffer: stale.length, eintraege: stale.slice(0, 30).map(brief) };
     }
     case "shopping_list": {
-      const low = rows.filter((r: any) => r.status === "closed" && r.min_stock !== null && r.quantity < r.min_stock);
+      // Mindestbestand je Produkt: geschlossene Flaschen aller Einträge zählen, offene nicht
+      const low = stockGroups(rows).filter((g: any) => g.low);
       return {
         vorgemerkt: rows.filter((r: any) => r.reorder).map(brief),
-        unter_mindestbestand: low.map((r: any) => ({ ...brief(r), mindestbestand: r.min_stock })),
+        unter_mindestbestand: low.map((g: any) => ({ ...brief(g.rep), mindestbestand: g.min, geschlossen_vorhanden: g.closed, offen_vorhanden: g.open })),
         neue_produkte: wishlist.map((w: any) => ({ wishlist_id: w.id, produkt: `${w.brand ?? ""} ${w.name}`.trim(), menge: w.quantity ?? 1, notiz: w.notes ?? undefined })),
       };
     }
@@ -464,6 +530,7 @@ Regeln:
 - Gibt es kein passendes Rezept aus den Videos, beantworte Cocktailfragen aus deinem Allgemeinwissen, prüfe die Zutaten mit search_bottles und weise kurz darauf hin, dass das Rezept nicht aus seinen Videos stammt.
 - Sagt der Benutzer "merk dir ..." oder nennt er eine dauerhafte Absprache (zum Beispiel einen Kurznamen für eine Flasche oder eine Vorliebe), schlage add_note vor. Sagt er "vergiss ...", nutze remove_note.
 - Füllstand: Setze ihn mit set_fill auf eine Prozentzahl. Übersetze Umgangssprache so: "voll" 100, "fast voll" 90, "dreiviertel" 75, "halb" 50, "letztes Drittel" oder "ein Drittel" 30, "Viertel" 25, "fast leer" oder "Neige" 10. Sag in deinem Satz die Prozentzahl, damit der Benutzer sie bei der Bestätigung sieht. set_fill geht nur bei offenen Flaschen. Ist die Flasche noch geschlossen, schlage zuerst mark_open und danach set_fill vor, sofern es genau eine Flasche mit Anzahl 1 ist. Sonst frage nach.
+- Die Eingabe kommt oft per Spracherkennung, die Produktnamen falsch hört (zum Beispiel "schöner" statt "Cynar"). Steht in Klammern "andere mögliche Hörweisen", nutze sie beim Suchen. Meldet search_bottles klingt_aehnlich_gesucht, nenne den gefundenen Namen im Satz und frage vor jeder Änderung mit ask_choice nach.
 - Außerhalb von Bar, Bestand und Getränken hilfst du nicht.${notes.length ? `
 Merkliste des Benutzers (feste Absprachen, beachte sie immer):
 ${notes.map((n: any) => `- ${n.text} (note_id ${n.id}, nie vorlesen)`).join("\n")}` : ""}`;
@@ -510,6 +577,12 @@ Deno.serve(async (req) => {
 
   let data: any;
   try { data = await loadData(db); } catch (e) { return json({ error: "Bestand konnte nicht geladen werden: " + (e as Error).message }, 500); }
+
+  // Spracheingabe: andere Hörweisen des Satzes (nur wenige Wörter, deshalb kaum Mehrkosten)
+  const heard = (Array.isArray(body?.heard) ? body.heard : []).filter((x: any) => typeof x === "string").slice(0, 4).map((x: string) => x.slice(0, 200));
+  if (heard.length > 0) {
+    history[history.length - 1].content += `\n(Spracherkennung, andere mögliche Hörweisen: ${heard.map((h: string) => `"${h}"`).join("; ")})`;
+  }
 
   const messages: any[] = history;
   const ctx = { shown: [] as string[], recipes: [] as string[] };

@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { supabase } from './supabase'
 import { SHOPS, shopLink, productQuery } from './shops'
+import { stockGroups } from './utils'
 
 const eur = n => (n === null || n === undefined ? '' : Number(n).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' }))
 
@@ -11,24 +12,25 @@ export default function Einkauf({ bottles, wishlist = [], reload }) {
   const [newItem, setNewItem] = useState('')
   const [newQty, setNewQty] = useState(1)
 
+  // Eine Zeile je Produkt (Marke, Name, Größe, Alkoholgehalt), nicht je Eintrag
   const items = useMemo(() => {
     const list = []
-    for (const b of bottles) {
-      const low = b.min_stock !== null && b.min_stock !== undefined && b.status === 'closed' && b.quantity < b.min_stock
-      if (!b.reorder && !low) continue
-      list.push({ b, low, flagged: b.reorder, need: low ? Math.max(1, b.min_stock - b.quantity) : 1 })
+    for (const g of stockGroups(bottles).values()) {
+      if (!g.reorder && !g.low) continue
+      list.push({ g, b: g.rep, low: g.low, flagged: g.reorder, need: g.need })
     }
     return list.sort((x, y) => (x.b.brand + x.b.name).localeCompare(y.b.brand + y.b.name, 'de'))
   }, [bottles])
 
-  async function clearFlag(b) {
-    const { error } = await supabase.from('bottles').update({ reorder: false }).eq('id', b.id)
+  async function clearFlag(g) {
+    const ids = g.entries.filter(x => x.reorder).map(x => x.id)
+    const { error } = await supabase.from('bottles').update({ reorder: false }).in('id', ids)
     if (error) setMsg('Fehler: ' + error.message)
     else reload()
   }
 
-  async function dropLow(b) {
-    const { error } = await supabase.from('bottles').update({ min_stock: 0, reorder: false }).eq('id', b.id)
+  async function dropLow(g) {
+    const { error } = await supabase.from('bottles').update({ min_stock: 0, reorder: false }).in('id', g.entries.map(x => x.id))
     if (error) setMsg('Fehler: ' + error.message)
     else reload()
   }
@@ -130,11 +132,11 @@ export default function Einkauf({ bottles, wishlist = [], reload }) {
           </div>
         )
       })}
-      {items.map(({ b, low, flagged, need }) => {
+      {items.map(({ g, b, low, flagged, need }) => {
         const q = productQuery(b)
         const pr = prices[b.id]
         return (
-          <div key={b.id} className="card buy">
+          <div key={g.key} className="card buy">
             <div className="card-info full">
               <h3>{b.brand} {b.name}</h3>
               <p>
@@ -143,7 +145,7 @@ export default function Einkauf({ bottles, wishlist = [], reload }) {
               </p>
               <div className="tags">
                 {flagged && <span className="tag warn">Vorgemerkt</span>}
-                {low && <span className="tag warn">Mindestbestand {b.quantity}/{b.min_stock}</span>}
+                {low && <span className="tag warn">Mindestbestand {g.closed}/{g.min}{g.open > 0 ? ` · ${g.open} offen` : ''}</span>}
               </div>
             </div>
 
@@ -173,10 +175,10 @@ export default function Einkauf({ bottles, wishlist = [], reload }) {
 
             <div className="actions full">
               <button onClick={() => searchPrices(b)} disabled={pr?.loading}>{pr?.loading ? 'Sucht Preise…' : 'Preise suchen (KI)'}</button>
-              {flagged && !low && <button className="ghost" onClick={() => clearFlag(b)}>Entfernen</button>}
-              {low && <button className="ghost" onClick={() => dropLow(b)}>Nicht mehr nachkaufen</button>}
+              {flagged && !low && <button className="ghost" onClick={() => clearFlag(g)}>Entfernen</button>}
+              {low && <button className="ghost" onClick={() => dropLow(g)}>Nicht mehr nachkaufen</button>}
             </div>
-            {low && <div className="hint full">Verschwindet, sobald der Bestand wieder reicht (Lieferung erfassen). „Nicht mehr nachkaufen“ setzt den Mindestbestand auf 0.</div>}
+            {low && <div className="hint full">Gezählt werden die geschlossenen Flaschen aller Einträge dieses Produkts. Verschwindet, sobald der Bestand wieder reicht (Lieferung erfassen). „Nicht mehr nachkaufen“ setzt den Mindestbestand auf 0.</div>}
           </div>
         )
       })}

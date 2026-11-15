@@ -35,6 +35,7 @@ export default function Chat({ hidden, onOpenBottle, reload }) {
   const convRef = useRef(conv)
   const recRef = useRef(null)
   const finalRef = useRef('')
+  const altRef = useRef([])
   const msgsRef = useRef([])
   const endRef = useRef(null)
   const openRef = useRef(false)
@@ -76,23 +77,37 @@ export default function Chat({ hidden, onOpenBottle, reload }) {
     stopSpeak()
     stopListen()
     finalRef.current = ''
+    altRef.current = []
     const r = new SR()
     r.lang = 'de-DE'
     r.interimResults = true
     r.continuous = false
+    r.maxAlternatives = 5
     r.onresult = e => {
       let t = ''
       for (const res of e.results) t += res[0].transcript
       setInput(t)
-      if (e.results[e.results.length - 1].isFinal) finalRef.current = t
+      const last = e.results[e.results.length - 1]
+      if (last.isFinal) {
+        finalRef.current = t
+        // Andere Hörweisen des letzten Satzteils: helfen, wenn ein Produktname falsch erkannt wurde ("schöner" statt "Cynar")
+        const alts = []
+        for (let i = 1; i < last.length; i++) {
+          const a = String(last[i].transcript || '').trim()
+          if (a && a !== last[0].transcript.trim() && !alts.includes(a)) alts.push(a)
+        }
+        altRef.current = e.results.length === 1 ? alts.slice(0, 4) : []
+      }
     }
     r.onerror = () => { setListening(false) }
     r.onend = () => {
       setListening(false)
       recRef.current = null
       const t = finalRef.current.trim()
+      const alts = altRef.current
       finalRef.current = ''
-      if (t) send(t)
+      altRef.current = []
+      if (t) send(t, undefined, alts)
     }
     recRef.current = r
     setListening(true)
@@ -101,7 +116,7 @@ export default function Chat({ hidden, onOpenBottle, reload }) {
 
   const history = list => list.filter(m => m.text).map(m => ({ role: m.role, content: m.text }))
 
-  async function send(text, display) {
+  async function send(text, display, heard) {
     const q = String(text || '').trim()
     if (!q || busy) return
     stopSpeak()
@@ -110,7 +125,7 @@ export default function Chat({ hidden, onOpenBottle, reload }) {
     setInput('')
     setBusy(true)
     try {
-      const d = await callFn({ messages: history(next) })
+      const d = await callFn({ messages: history(next), ...(heard && heard.length ? { heard } : {}) })
       const reply = { id: Date.now() + 'a', role: 'assistant', text: d.reply || '', shown: d.shown || [], recipes: d.recipes || [], choices: d.choices || [], proposal: d.proposal || null }
       setMsgs(m => [...m, reply])
       speak(d.reply)

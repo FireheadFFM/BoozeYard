@@ -175,7 +175,7 @@ async function callYt(body) {
   return data
 }
 
-function YoutubeRezepte() {
+export function YoutubeRezepte() {
   const [st, setSt] = useState(null)
   const [busy, setBusy] = useState(false)
   const [log, setLog] = useState('')
@@ -337,7 +337,6 @@ export default function Export({ bottles, cats, rooms, locations, reload }) {
       </div>
       <p className="hint">In Excel: Daten → Daten abrufen → Aus anderen Quellen → Leere Abfrage → Erweiterter Editor → Code einfügen → Fertig → Schließen und laden. Danach unter Daten → Alle aktualisieren (oder beim Öffnen automatisch, in den Abfrageeigenschaften „Daten beim Öffnen der Datei aktualisieren“). Die Live-Daten sind schreibgeschützt, zum Ändern nutze die Excel-Datei oben.</p>
 
-      <YoutubeRezepte />
     </div>
   )
 }

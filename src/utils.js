@@ -3,7 +3,39 @@
 export const SIZES = [20, 30, 50, 100, 200, 350, 500, 700, 750, 1000, 1500, 1750]
 export const STATUS = { closed: 'Geschlossen', open: 'Offen', empty: 'Leer' }
 export const BUCKET = 'bottle-images'
-export const APP_VERSION = 'U12'
+export const APP_VERSION = 'U13'
+
+/* ---------- Bestand je Produkt (Mindestbestand) ---------- */
+
+export const normKey = s => String(s ?? '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]/g, '')
+
+// Ein Produkt = gleiche Marke, Name, Größe und Alkoholgehalt (egal ob geschlossen, offen oder in mehreren Einträgen)
+export const productKey = b =>
+  `${normKey(b.brand)}|${normKey(b.name)}|${b.size_ml ?? ''}|${b.abv === null || b.abv === undefined || b.abv === '' ? '' : Number(b.abv)}`
+
+// Gruppiert alle Einträge je Produkt. low = Mindestbestand gesetzt und weniger geschlossene Flaschen vorhanden.
+// Offene Flaschen zählen nicht mit: ist nur noch eine offene übrig, ist das Produkt "unter Mindestbestand".
+export function stockGroups(bottles) {
+  const map = new Map()
+  for (const b of bottles) {
+    const key = productKey(b)
+    let g = map.get(key)
+    if (!g) { g = { key, entries: [], closed: 0, open: 0, live: 0, min: null, reorder: false, rep: null }; map.set(key, g) }
+    g.entries.push(b)
+    if (b.status === 'closed') g.closed += b.quantity
+    if (b.status === 'open') g.open += b.quantity
+    if (b.status !== 'empty') g.live += 1
+    if (b.min_stock !== null && b.min_stock !== undefined && (g.min === null || b.min_stock > g.min)) g.min = b.min_stock
+    if (b.reorder) g.reorder = true
+  }
+  const rank = { closed: 0, open: 1, empty: 2 }
+  for (const g of map.values()) {
+    g.rep = [...g.entries].sort((x, y) => rank[x.status] - rank[y.status])[0]
+    g.low = g.min !== null && g.min > 0 && g.closed < g.min
+    g.need = g.low ? Math.max(1, g.min - g.closed) : 1
+  }
+  return map
+}
 
 // Holt alle Zeilen seitenweise (Supabase liefert pro Abfrage höchstens 1000).
 // make() muss bei jedem Aufruf eine frische Abfrage mit fester Sortierung liefern.
@@ -108,31 +140,39 @@ export function mainCategoryFromTags(tags, mains) {
   return ''
 }
 
+// Kostenlose offene Datenbanken, der Reihe nach abgefragt: erst Lebensmittel, dann allgemeine Produkte
+const FACT_SOURCES = [
+  ['Open Food Facts', 'world.openfoodfacts.org'],
+  ['Open Products Facts', 'world.openproductsfacts.org'],
+]
+
 export async function lookupBarcode(variants, mains) {
-  for (const v of variants) {
-    try {
-      const url = `https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(v)}.json?fields=product_name,brands,quantity,categories_tags,nutriments`
-      const r = await fetch(url)
-      const j = await r.json()
-      if (j.status !== 1 || !j.product) continue
-      const p = j.product
-      const n = p.nutriments || {}
-      const abvRaw = [n.alcohol, n.alcohol_100g, n.alcohol_value].find(x => typeof x === 'number' && x > 0)
-      const out = {
-        brand: (p.brands || '').split(',')[0].trim(),
-        name: p.product_name || '',
-        size_ml: parseSize(p.quantity),
-        abv: abvRaw ?? null,
-        mainId: mainCategoryFromTags(p.categories_tags, mains),
-      }
-      const got = []
-      if (out.brand) got.push('Marke')
-      if (out.name) got.push('Name')
-      if (out.size_ml) got.push('Größe')
-      if (out.abv !== null) got.push('Alkoholgehalt')
-      if (out.mainId) got.push('Kategorie')
-      return { ...out, got }
-    } catch { /* nächste Variante */ }
+  for (const [source, host] of FACT_SOURCES) {
+    for (const v of variants) {
+      try {
+        const url = `https://${host}/api/v2/product/${encodeURIComponent(v)}.json?fields=product_name,brands,quantity,categories_tags,nutriments`
+        const r = await fetch(url, typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? { signal: AbortSignal.timeout(7000) } : undefined)
+        const j = await r.json()
+        if (j.status !== 1 || !j.product) continue
+        const p = j.product
+        const n = p.nutriments || {}
+        const abvRaw = [n.alcohol, n.alcohol_100g, n.alcohol_value].find(x => typeof x === 'number' && x > 0)
+        const out = {
+          brand: (p.brands || '').split(',')[0].trim(),
+          name: p.product_name || '',
+          size_ml: parseSize(p.quantity),
+          abv: abvRaw ?? null,
+          mainId: mainCategoryFromTags(p.categories_tags, mains),
+        }
+        const got = []
+        if (out.brand) got.push('Marke')
+        if (out.name) got.push('Name')
+        if (out.size_ml) got.push('Größe')
+        if (out.abv !== null) got.push('Alkoholgehalt')
+        if (out.mainId) got.push('Kategorie')
+        if (got.length > 0) return { ...out, got, source }
+      } catch { /* nächste Variante oder Quelle */ }
+    }
   }
   return null
 }

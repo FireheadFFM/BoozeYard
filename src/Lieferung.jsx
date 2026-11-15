@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from './supabase'
 import { resizeImage, blobToBase64, digitsOnly, codeVariants, lsGet, lsSet } from './utils'
 
@@ -35,12 +35,37 @@ export default function Lieferung({ bottles, cats, rooms, locations, lookups, re
   const [roomId, setRoomId] = useState(lsGet('deliv_room') || '')
   const [locId, setLocId] = useState(lsGet('deliv_loc') || '')
   const [result, setResult] = useState(null)
+  const [dupInv, setDupInv] = useState([])      // schon gebuchte Lieferungen mit gleicher Rechnungsnummer
+  const [dupAck, setDupAck] = useState(false)
   const camRef = useRef(null)
   const fileRef = useRef(null)
 
   const mains = useMemo(() => cats.filter(c => !c.parent_id), [cats])
   const roomLocs = useMemo(() => locations.filter(l => l.room_id === roomId), [locations, roomId])
   const bottleById = useMemo(() => Object.fromEntries(bottles.map(b => [b.id, b])), [bottles])
+
+  // Rechnungsnummer schon gebucht? Prüft beim Bearbeiten von Beleg-Nr. und Lieferant (mit kurzer Verzögerung)
+  useEffect(() => {
+    if (stage !== 'review') return
+    const no = head.invoice_no.trim()
+    if (no.length < 3) { setDupInv([]); return }
+    let alive = true
+    const t = setTimeout(async () => {
+      const { data, error: e } = await supabase.from('deliveries').select('id,supplier,invoice_no,delivered_at').eq('invoice_no', no)
+      if (!alive || e || !data) return
+      const sup = norm(head.supplier)
+      const hits = data.filter(d => !sup || !d.supplier || norm(d.supplier) === sup || norm(d.supplier).includes(sup) || sup.includes(norm(d.supplier)))
+      if (hits.length === 0) { setDupInv([]); return }
+      const withCount = []
+      for (const d of hits) {
+        const { count } = await supabase.from('movements').select('id', { count: 'exact', head: true }).eq('delivery_id', d.id)
+        withCount.push({ ...d, positions: count ?? null })
+      }
+      if (alive) setDupInv(withCount)
+    }, 400)
+    return () => { alive = false; clearTimeout(t) }
+  }, [stage, head.invoice_no, head.supplier])
+  useEffect(() => { setDupAck(false) }, [head.invoice_no, head.supplier])
 
   function addFiles(list) {
     const next = []
@@ -115,6 +140,7 @@ export default function Lieferung({ bottles, cats, rooms, locations, lookups, re
   async function save() {
     setError('')
     if (included.length === 0) return setError('Keine Position ausgewählt.')
+    if (dupInv.length > 0 && !dupAck) return setError('Diese Rechnung wurde schon gebucht. Bitte oben bestätigen, wenn du sie trotzdem noch einmal verbuchen willst.')
     for (const it of included) {
       if (!String(it.brand).trim() || !String(it.name).trim()) return setError(`Bitte Marke und Name ergänzen: „${it.desc || 'Position'}“.`)
       if (!(Number(it.quantity) >= 1)) return setError(`Menge fehlt bei ${it.brand} ${it.name}.`)
@@ -192,7 +218,7 @@ export default function Lieferung({ bottles, cats, rooms, locations, lookups, re
   }
 
   function reset() {
-    setStage('pick'); setFiles([]); setItems([]); setResult(null); setError('')
+    setStage('pick'); setFiles([]); setItems([]); setResult(null); setError(''); setDupInv([]); setDupAck(false)
     setHead({ supplier: '', invoice_no: '', date: '', total: '' })
   }
 
@@ -221,6 +247,17 @@ export default function Lieferung({ bottles, cats, rooms, locations, lookups, re
           <label className="fld"><span>Datum</span><input type="date" value={head.date} onChange={e => setHead({ ...head, date: e.target.value })} /></label>
           <label className="fld"><span>Summe laut Beleg (€)</span><input inputMode="decimal" value={head.total} onChange={e => setHead({ ...head, total: e.target.value })} /></label>
         </div>
+
+        {dupInv.length > 0 && (
+          <div className="dup-invoice">
+            <div>
+              <b>Achtung, mögliche Doppelbuchung:</b> Rechnung {head.invoice_no.trim()}{dupInv[0].supplier ? ` von ${dupInv[0].supplier}` : ''} wurde schon
+              {dupInv.length > 1 ? ` ${dupInv.length}× ` : ' '}verbucht
+              ({dupInv.map(d => `${d.delivered_at ? new Date(d.delivered_at).toLocaleDateString('de-DE') : 'Datum unbekannt'}${d.positions ? `, ${d.positions} Positionen` : ''}`).join('; ')}).
+            </div>
+            <label className="check"><input type="checkbox" checked={dupAck} onChange={e => setDupAck(e.target.checked)} /> Trotzdem noch einmal verbuchen</label>
+          </div>
+        )}
 
         <div className="two">
           <label className="fld"><span>Raum für neue Flaschen</span>
@@ -287,6 +324,7 @@ export default function Lieferung({ bottles, cats, rooms, locations, lookups, re
                           </optgroup>
                         ))}
                       </select>
+                      <label className="fld"><span>Jahrgang (optional)</span><input value={it.vintage} onChange={e => setItem(it.key, { vintage: e.target.value })} /></label>
                       {(it.country || it.region) && <div className={'hint' + (guess('country') || guess('region') ? ' guess-t' : '')}>{[it.country, it.region].filter(Boolean).join(' · ')}</div>}
                     </>
                   )}

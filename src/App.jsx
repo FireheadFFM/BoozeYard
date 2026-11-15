@@ -3,12 +3,12 @@ import { supabase } from './supabase'
 import {
   SIZES, STATUS, BUCKET, APP_VERSION, fetchAll, lsGet, lsSet, abvLabel,
   digitsOnly, codeVariants, codeWarning, lookupBarcode, resizeImage, blobToBase64,
+  productKey, stockGroups,
 } from './utils'
-import Rooms from './Rooms'
 import Chat from './Chat'
 import Einkauf from './Einkauf'
 import Lieferung from './Lieferung'
-import Export from './Export'
+import Verwaltung from './Verwaltung'
 import WakeToggle from './WakeLock'
 import './App.css'
 
@@ -155,9 +155,9 @@ async function resolveCode(raw, bottles, cats) {
     const mains = cats.filter(c => !c.parent_id)
     const found = await lookupBarcode(variants, mains)
     if (found && found.got.length > 0) {
-      data = { barcode: code, ...found, note: `Aus Open Food Facts übernommen: ${found.got.join(', ')}. Bitte prüfen und ergänzen.` }
+      data = { barcode: code, ...found, note: `Aus ${found.source || 'Open Food Facts'} übernommen: ${found.got.join(', ')}. Bitte prüfen und ergänzen.` }
     } else {
-      data = { barcode: code, note: 'Barcode übernommen – keine Produktdaten gefunden. Bitte von Hand ausfüllen oder das Etikett fotografieren.' }
+      data = { barcode: code, note: 'Barcode übernommen – in Open Food Facts und Open Products Facts steht dazu nichts. Unten beim Barcode-Feld kannst du „Barcode im Web suchen (KI)“ nutzen, das Etikett fotografieren oder von Hand ausfüllen.' }
     }
   }
   if (warn) data.note = `${data.note} ${warn}`
@@ -178,7 +178,8 @@ function Main({ userId, onLogout }) {
   const [editId, setEditId] = useState(null)
   const [series, setSeries] = useState({ roomId: '', locId: '' })
   const [wishlist, setWishlist] = useState([])
-  const [scanView, setScanView] = useState(null)
+  const [capView, setCapView] = useState(null)   // null = Startseite der Erfassung | 'form' | 'deliv'
+  const [adminKey, setAdminKey] = useState(0)
   const [dup, setDup] = useState(null)       // { data, id } – gescannte Flasche ist schon geschlossen im Bestand
   const [dupMsg, setDupMsg] = useState('')
 
@@ -226,7 +227,7 @@ function Main({ userId, onLogout }) {
     if (data._dupId) { setDup({ data, id: data._dupId }); return }
     setPrefill(p => ({ key: p.key + 1, data }))
     setEditId(null)
-    setTab('add')
+    setCapView('form')
   }
 
   // Schon geschlossen im Bestand: Anzahl um 1 erhöhen
@@ -245,10 +246,17 @@ function Main({ userId, onLogout }) {
     setDup(null)
     setPrefill(p => ({ key: p.key + 1, data }))
     setEditId(null)
-    setTab('add')
+    setCapView('form')
   }
 
-  // Etikett-Foto aus dem Scanner-Tab: direkt KI, dann Formular vorbefüllt
+  function manualEntry() {
+    setDupMsg('')
+    setPrefill(p => ({ key: p.key + 1, data: null }))
+    setEditId(null)
+    setCapView('form')
+  }
+
+  // Etikett-Foto aus der Erfassung: direkt KI, dann Formular vorbefüllt
   async function handleLabel({ front, back }) {
     try {
       const r = await runAnalyze([front, back].filter(Boolean), cats, lookups)
@@ -260,7 +268,7 @@ function Main({ userId, onLogout }) {
         : 'Auf dem Foto konnte nichts sicher erkannt werden. Bitte von Hand ausfüllen.'
       setPrefill(p => ({ key: p.key + 1, data }))
       setEditId(null)
-      setTab('add')
+      setCapView('form')
       return ''
     } catch (e) {
       return 'Auswertung fehlgeschlagen: ' + e.message
@@ -269,19 +277,20 @@ function Main({ userId, onLogout }) {
 
   const tabs = [
     ['bottles', 'Bestand'],
-    ['rooms', 'Lagerorte'],
-    ['scanner', 'Scanner'],
-    ['add', '+ Neu'],
+    ['capture', 'Erfassen'],
     ['buy', 'Einkauf'],
-    ['export', 'Export'],
+    ['admin', 'Verwaltung'],
   ]
+  const seriesPlace = series.roomId
+    ? [rooms.find(r => r.id === series.roomId)?.name, locations.find(l => l.id === series.locId)?.name].filter(Boolean).join(' › ')
+    : ''
   const editing = editId ? bottles.find(b => b.id === editId) : null
 
   return (
     <Shell onLogout={onLogout}>
       <nav>
         {tabs.map(([id, label]) => (
-          <button key={id} onClick={() => { setTab(id); setEditId(null); setScanView(null); setDup(null); setDupMsg(''); if (id === 'bottles' || id === 'rooms') setSeries({ roomId: '', locId: '' }) }} className={tab === id ? 'active' : ''}>{label}</button>
+          <button key={id} onClick={() => { setTab(id); setEditId(null); setCapView(null); setDup(null); setDupMsg(''); if (id === 'admin') setAdminKey(k => k + 1); if (id === 'bottles' || id === 'admin') setSeries({ roomId: '', locId: '' }) }} className={tab === id ? 'active' : ''}>{label}</button>
         ))}
       </nav>
       <main>
@@ -295,10 +304,7 @@ function Main({ userId, onLogout }) {
           <BottleForm key={editing.id} userId={userId} bottle={editing} cats={cats} rooms={rooms}
             locations={locations} lookups={lookups} bottles={bottles} reload={loadAll} onDone={() => setEditId(null)} />
         )}
-        {!loading && tab === 'rooms' && (
-          <Rooms bottles={bottles} rooms={rooms} locations={locations} reload={loadAll} />
-        )}
-        {tab === 'scanner' && scanView !== 'deliv' && (
+        {tab === 'capture' && capView === null && (
           <>
             {dupMsg && <div className="msg">{dupMsg}</div>}
             {dup && (() => {
@@ -317,33 +323,40 @@ function Main({ userId, onLogout }) {
                 </div>
               )
             })()}
-            <Scanner onCode={handleCode} onLabel={handleLabel} />
+            {seriesPlace && (
+              <div className="series-box">
+                <span>Neue Flaschen kommen nach <b>{seriesPlace}</b></span>
+                <button type="button" onClick={() => setSeries({ roomId: '', locId: '' })}>Zurücksetzen</button>
+              </div>
+            )}
+            <Scanner onCode={handleCode} onLabel={handleLabel} onManual={manualEntry} />
             <div className="card column deliv-entry">
               <h3>Lieferschein oder Rechnung</h3>
               <p>Beleg als Foto oder PDF einlesen, die KI erfasst alle Positionen auf einmal.</p>
-              <button className="scan-btn secondary" style={{ marginTop: 0 }} onClick={() => setScanView('deliv')}>Beleg erfassen</button>
+              <button className="scan-btn secondary" style={{ marginTop: 0 }} onClick={() => setCapView('deliv')}>Beleg erfassen</button>
             </div>
           </>
         )}
-        {!loading && tab === 'scanner' && scanView === 'deliv' && (
+        {!loading && tab === 'capture' && capView === 'deliv' && (
           <>
-            <button className="link-back" onClick={() => setScanView(null)}>← Zurück zum Scanner</button>
+            <button className="link-back" onClick={() => setCapView(null)}>← Zurück zur Erfassung</button>
             <Lieferung bottles={bottles} cats={cats} rooms={rooms} locations={locations} lookups={lookups}
-              reload={loadAll} onDone={() => { setScanView(null); setTab('bottles') }} />
+              reload={loadAll} onDone={() => { setCapView(null); setTab('bottles') }} />
           </>
         )}
-        {!loading && tab === 'buy' && <Einkauf bottles={bottles} wishlist={wishlist} reload={loadAll} />}
-        {!loading && tab === 'export' && (
-          <Export bottles={bottles} cats={cats} rooms={rooms} locations={locations} reload={loadAll} />
-        )}
-        {!loading && tab === 'add' && (
+        {!loading && tab === 'capture' && capView === 'form' && (
           <BottleForm key={prefill.key} userId={userId} prefill={prefill.data} cats={cats} rooms={rooms}
             locations={locations} lookups={lookups} bottles={bottles} reload={loadAll}
             series={series} onSeries={(roomId, locId, extra) => setSeries({ roomId, locId, ...(extra || {}) })}
-            onFinish={() => { setSeries({ roomId: '', locId: '' }); setTab('bottles') }} />
+            onBack={() => setCapView(null)} onNext={() => setCapView(null)}
+            onFinish={() => { setSeries({ roomId: '', locId: '' }); setCapView(null); setTab('bottles') }} />
+        )}
+        {!loading && tab === 'buy' && <Einkauf bottles={bottles} wishlist={wishlist} reload={loadAll} />}
+        {!loading && tab === 'admin' && (
+          <Verwaltung key={adminKey} bottles={bottles} cats={cats} rooms={rooms} locations={locations} reload={loadAll} />
         )}
       </main>
-      <Chat hidden={tab === 'add' || (tab === 'bottles' && !!editId)}
+      <Chat hidden={(tab === 'capture' && capView === 'form') || (tab === 'bottles' && !!editId)}
         onOpenBottle={id => { setTab('bottles'); setEditId(id) }} reload={loadAll} />
     </Shell>
   )
@@ -373,6 +386,7 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit })
   const catById = useMemo(() => Object.fromEntries(cats.map(c => [c.id, c])), [cats])
   const roomById = useMemo(() => Object.fromEntries(rooms.map(r => [r.id, r])), [rooms])
   const locById = useMemo(() => Object.fromEntries(locations.map(l => [l.id, l])), [locations])
+  const groups = useMemo(() => stockGroups(bottles), [bottles])
   const mains = cats.filter(c => !c.parent_id)
 
   function toggleSel(id) {
@@ -587,7 +601,7 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit })
               <button type="button" className="primary" disabled={!mvRoom || mvBusy} onClick={moveSelected}>
                 {mvBusy ? 'Verschiebt…' : `${sel.size} ${sel.size === 1 ? 'Eintrag' : 'Einträge'} verschieben`}
               </button>
-              <div className="hint">Neue Räume und Orte legst du im Tab „Lagerorte“ an.</div>
+              <div className="hint">Neue Räume und Orte legst du unter Verwaltung → Lagerorte an.</div>
             </div>
           )}
         </div>
@@ -604,6 +618,9 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit })
         const label = abvLabel(b.abv)
         const place = [roomById[b.room_id]?.name, locById[b.location_id]?.name].filter(Boolean).join(' › ')
         const thumb = b.image_thumb ? thumbs[b.image_thumb] : null
+        const g = groups.get(productKey(b))
+        // Mindestbestand gilt je Produkt: Tag nur an nicht leeren Einträgen (oder am Hauptstück, wenn alles leer ist)
+        const showLow = !!g && g.low && !g.reorder && (b.status !== 'empty' || (g.live === 0 && g.rep.id === b.id))
         return (
           <div key={b.id} className={'card' + (b.status === 'empty' ? ' dim' : '') + (selMode && sel.has(b.id) ? ' picked' : '')}>
             {selMode && (
@@ -635,7 +652,7 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit })
                 {label && label !== 'Standard' && <span className="tag">{label}</span>}
                 {b.is_collection && <span className="tag">Sammlung</span>}
                 {b.is_sample && <span className="tag">Sample</span>}
-                {b.min_stock !== null && b.status === 'closed' && b.quantity < b.min_stock && !b.reorder && <span className="tag warn">Unter Mindestbestand</span>}
+                {showLow && <span className="tag warn">Unter Mindestbestand ({g.closed}/{g.min})</span>}
                 <button type="button" className={'tag tag-btn' + (b.reorder ? ' on' : '')} onClick={() => toggleReorder(b)}>{b.reorder ? 'Vorgemerkt ✓' : '+ Nachkaufen'}</button>
               </div>
             </div>
@@ -725,7 +742,7 @@ async function decodeFromFile(file) {
 
 const camIsFront = d => /front|user|selfie|vorn/i.test(d.label || '')
 
-function Scanner({ onCode, onLabel, compact = false, autoStart = false, onClose }) {
+function Scanner({ onCode, onLabel, onManual, compact = false, autoStart = false, onClose }) {
   const videoRef = useRef(null)
   const streamRef = useRef(null)
   const trackRef = useRef(null)
@@ -983,11 +1000,12 @@ function Scanner({ onCode, onLabel, compact = false, autoStart = false, onClose 
 
   return (
     <div className="scanner-box">
-      <h3>Barcode Scanner</h3>
-      <p>Am zuverlässigsten: den Strichcode mit der Kamera-App fotografieren, die App liest ihn aus dem Foto. Alternativ den Live-Scanner nutzen. Ohne Barcode: das Etikett fotografieren, die KI liest die Daten ab.</p>
+      <h3>Flasche erfassen</h3>
+      <p>Am zuverlässigsten: den Strichcode fotografieren, die App liest ihn aus dem Foto. Alternativ den Live-Scanner nutzen. Ohne Barcode: das Etikett fotografieren, die KI liest die Daten ab. Oder alles von Hand eintragen.</p>
       {!scanning && <button className="scan-btn" onClick={() => photoRef.current?.click()} disabled={busy}>Barcode fotografieren</button>}
       {!scanning && <button className="scan-btn secondary label-btn" onClick={() => start()} disabled={busy}>Live-Scanner starten</button>}
       {!scanning && <button className="scan-btn secondary label-btn" onClick={() => setLabelOpen(true)} disabled={busy}>Etikett fotografieren (KI)</button>}
+      {!scanning && onManual && <button className="scan-btn secondary label-btn" onClick={onManual} disabled={busy}>Von Hand eintragen</button>}
       {photoInput}
       <video ref={videoRef} playsInline muted onClick={tapFocus} style={{ display: scanning ? 'block' : 'none' }} />
       {scanning && camName && <div className="cam-name">{camName}</div>}
@@ -1006,7 +1024,7 @@ function Scanner({ onCode, onLabel, compact = false, autoStart = false, onClose 
   )
 }
 
-/* ---------- KI-Auswertung (gemeinsam für Formular und Scanner-Tab) ---------- */
+/* ---------- KI-Auswertung (gemeinsam für Formular und Erfassen-Tab) ---------- */
 
 const sameText = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase()
 
@@ -1155,7 +1173,7 @@ function ImageSlot({ label, url, onPick, onRemove, onZoom }) {
   )
 }
 
-function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, bottles = [], reload, onDone, series, onSeries, onFinish }) {
+function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, bottles = [], reload, onDone, series, onSeries, onFinish, onNext, onBack }) {
   const edit = !!bottle
   const mains = cats.filter(c => !c.parent_id)
   const touchedRef = useRef(!!series?.touched)
@@ -1175,6 +1193,7 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
   const [busy, setBusy] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [analyzing, setAnalyzing] = useState(false)
+  const [searching, setSearching] = useState(false)
   const [zoomIdx, setZoomIdx] = useState(null)
   const [scanOpen, setScanOpen] = useState(false)
   const [done, setDone] = useState(null)
@@ -1274,7 +1293,7 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
   }
 
   // Foto-Auswertung mit Claude (über die Supabase-Funktion analyze-label)
-  function applyAi(r, keep = false) {
+  function applyAi(r, keep = false, src = 'dem Foto') {
     if (!r) throw new Error('Keine Antwort erhalten')
     const cur = fRef.current
     const next = { ...cur }
@@ -1295,7 +1314,7 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
     }
 
     if (r.abv !== null && r.abv !== undefined && take(String(cur.abv) !== '')) { next.abv = String(r.abv); filled.push('Alkoholgehalt') }
-    if (r.size_ml && take(true)) {
+    if (r.size_ml && take(edit || cur.size !== '700' || !!cur.customSize)) {
       if (SIZES.includes(r.size_ml)) { next.size = String(r.size_ml); next.customSize = '' }
       else { next.size = 'other'; next.customSize = String(r.size_ml) }
       filled.push('Größe')
@@ -1319,7 +1338,7 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
 
     setF(next)
     setMsg(filled.length > 0
-      ? `Aus dem Foto ${keep ? 'ergänzt' : 'übernommen'}: ${filled.join(', ')}. Bitte alles prüfen.`
+      ? `Aus ${src} ${keep ? 'ergänzt' : 'übernommen'}: ${filled.join(', ')}. Bitte alles prüfen.`
       : (keep ? 'Es wurde nichts ergänzt, alle erkannten Felder sind schon befüllt.' : 'Auf dem Foto konnte nichts sicher erkannt werden.'))
   }
 
@@ -1347,6 +1366,42 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
       setError('Auswertung fehlgeschlagen: ' + e.message)
     }
     setAnalyzing(false)
+  }
+
+  // Barcode im Web suchen (KI mit Websuche, kostet ein paar Cent, nur auf Knopfdruck)
+  async function searchBarcodeAi() {
+    const ean = digitsOnly(f.barcode)
+    if (!ean) return setError('Bitte zuerst einen Barcode eintragen.')
+    setError(''); setMsg(''); setSearching(true)
+    try {
+      const mainsList = cats.filter(c => !c.parent_id)
+      const taxonomy = {
+        categories: Object.fromEntries(mainsList.map(c => [c.name, cats.filter(x => x.parent_id === c.id).map(x => x.name)])),
+        countries: lookups.filter(l => l.kind === 'country').map(l => l.name),
+        regions: [...new Set(lookups.filter(l => l.kind === 'region').map(l => l.name))],
+      }
+      const { data, error: fnError } = await supabase.functions.invoke('lookup-barcode', { body: { ean, taxonomy } })
+      if (fnError) {
+        let detail = fnError.message
+        try { const j = await fnError.context.json(); if (j?.error) detail = j.error } catch { /* ignorieren */ }
+        throw new Error(detail)
+      }
+      if (data?.error) throw new Error(data.error)
+      const r = data?.result
+      if (!r || !r.found) {
+        setMsg('Zu diesem Code wurde im Web kein eindeutiges Produkt gefunden. Bitte das Etikett fotografieren oder von Hand ausfüllen.')
+      } else {
+        applyAi(r, edit ? keepOld : true, 'der Web-Suche')
+        if (r.source_url) {
+          let host = r.source_url
+          try { host = new URL(r.source_url).hostname.replace(/^www\./, '') } catch { /* ignorieren */ }
+          setMsg(m => `${m} Quelle: ${host}`)
+        }
+      }
+    } catch (e) {
+      setError('Web-Suche fehlgeschlagen: ' + e.message)
+    }
+    setSearching(false)
   }
 
   function validate() {
@@ -1499,7 +1554,8 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
     return (
       <div className="form">
         <div className="msg">Gespeichert: {done.title}.{done.imageProblem}</div>
-        <button type="button" className="save-btn" onClick={newBottle}>Neue Flasche</button>
+        {onNext && <button type="button" className="save-btn" onClick={onNext}>Nächste Flasche erfassen</button>}
+        <button type="button" className={onNext ? 'scan-btn secondary' : 'save-btn'} style={onNext ? { width: '100%', marginTop: 0 } : undefined} onClick={newBottle}>Noch eine von Hand</button>
         <button type="button" className="scan-btn secondary" style={{ width: '100%', marginTop: 0 }} onClick={onFinish}>Zur Übersicht</button>
       </div>
     )
@@ -1507,6 +1563,7 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
 
   return (
     <div className="form">
+      {!edit && onBack && <button type="button" className="link-back" onClick={onBack}>← Zurück zur Erfassung</button>}
       {!edit && !scanOpen && (
         <button type="button" className="scan-btn secondary" style={{ width: '100%', marginTop: 0 }} onClick={() => setScanOpen(true)}>Barcode scannen</button>
       )}
@@ -1622,6 +1679,14 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
       <p className="hint">Liest Marke, Name, Kategorie, Alkoholgehalt, Größe und Herkunft von den Fotos ab und füllt die Felder vor. {edit ? 'Ohne neue Fotos werden die gespeicherten Fotos der Flasche verwendet. ' : ''}{edit && keepOld ? 'Bereits eingetragene Angaben bleiben unverändert.' : 'Bereits eingetragene Produktdaten werden dabei ersetzt.'}</p>
 
       <input placeholder="Barcode (optional)" inputMode="numeric" value={f.barcode} onChange={e => set('barcode', e.target.value)} />
+      {digitsOnly(f.barcode).length >= 8 && (
+        <>
+          <button type="button" className="ai-btn" onClick={searchBarcodeAi} disabled={searching}>
+            {searching ? 'Sucht im Web…' : 'Barcode im Web suchen (KI)'}
+          </button>
+          <p className="hint">Sucht den Code per KI-Websuche, wenn die Datenbanken nichts kennen. Kostet ein paar Cent, deshalb nur auf Knopfdruck. {edit && keepOld ? 'Bereits eingetragene Angaben bleiben unverändert.' : 'Nur leere Felder werden ergänzt.'}</p>
+        </>
+      )}
       <input placeholder="Mindestbestand (optional)" type="number" min="0" value={f.min_stock} onChange={e => set('min_stock', e.target.value)} />
       <input placeholder="Letzter Einkaufspreis in € (optional)" inputMode="decimal" value={f.last_price} onChange={e => set('last_price', e.target.value)} />
       <input placeholder="Notizen (optional)" value={f.notes} onChange={e => set('notes', e.target.value)} />
