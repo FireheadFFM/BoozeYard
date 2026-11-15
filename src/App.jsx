@@ -982,7 +982,7 @@ function Scanner({ onCode, onLabel, onManual, compact = false, autoStart = false
       <div className="scanner-box compact">
         <video ref={videoRef} playsInline muted onClick={tapFocus} style={{ display: scanning ? 'block' : 'none' }} />
         {!scanning && <button className="scan-btn label-btn" onClick={() => photoRef.current?.click()} disabled={busy}>Barcode fotografieren</button>}
-        {!scanning && <button className="scan-btn secondary label-btn" onClick={() => start()} disabled={busy}>Live-Scanner starten</button>}
+        {!scanning && <button className="scan-btn secondary label-btn" onClick={() => start()} disabled={busy}>Barcode Scanner starten</button>}
         {photoInput}
         {scanning && camName && <div className="cam-name">{camName}</div>}
         {zoomBox}
@@ -1001,9 +1001,9 @@ function Scanner({ onCode, onLabel, onManual, compact = false, autoStart = false
   return (
     <div className="scanner-box">
       <h3>Flasche erfassen</h3>
-      <p>Am zuverlässigsten: den Strichcode fotografieren, die App liest ihn aus dem Foto. Alternativ den Live-Scanner nutzen. Ohne Barcode: das Etikett fotografieren, die KI liest die Daten ab. Oder alles von Hand eintragen.</p>
+      <p>Am zuverlässigsten: den Strichcode fotografieren, die App liest ihn aus dem Foto. Alternativ den Barcode Scanner mit laufender Kamera starten. Ohne Barcode: das Etikett fotografieren, die KI liest die Daten ab. Oder alles von Hand eintragen.</p>
       {!scanning && <button className="scan-btn" onClick={() => photoRef.current?.click()} disabled={busy}>Barcode fotografieren</button>}
-      {!scanning && <button className="scan-btn secondary label-btn" onClick={() => start()} disabled={busy}>Live-Scanner starten</button>}
+      {!scanning && <button className="scan-btn secondary label-btn" onClick={() => start()} disabled={busy}>Barcode Scanner starten</button>}
       {!scanning && <button className="scan-btn secondary label-btn" onClick={() => setLabelOpen(true)} disabled={busy}>Etikett fotografieren (KI)</button>}
       {!scanning && onManual && <button className="scan-btn secondary label-btn" onClick={onManual} disabled={busy}>Von Hand eintragen</button>}
       {photoInput}
