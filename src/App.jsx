@@ -1180,7 +1180,7 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
   const [f, setF] = useState(() => {
     const base = initialForm(bottle, prefill, cats, series)
     if (!bottle) {
-      if (series?.touched) { base.status = series.status || base.status; base.fill_percent = series.fill ?? base.fill_percent }
+      if (series?.touched) base.status = series.status || base.status   // Füllstand startet bei jeder neuen Flasche wieder bei 100 %
       else {
         const l = locations.find(x => x.id === base.locId)
         if (l?.default_status === 'open') base.status = 'open'
@@ -1492,7 +1492,7 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
       let imageProblem = ''
       try { await syncImages(data.id) } catch (e) { imageProblem = ' Die Bilder konnten nicht hochgeladen werden: ' + e.message }
 
-      onSeries && onSeries(roomId, locationId || '', { touched: touchedRef.current, status: f.status, fill: f.fill_percent })
+      onSeries && onSeries(roomId, locationId || '', { touched: touchedRef.current, status: f.status })
       setDone({ title: `${row.brand} ${row.name}`, roomId, locId: locationId || '', imageProblem })
       reload()
     } catch (e) {
@@ -1519,7 +1519,9 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
 
   function newBottle() {
     const blank = { path: null, file: null, preview: null, removed: false }
-    setF(initialForm(null, null, cats, { roomId: done.roomId, locId: done.locId }))
+    const fresh = initialForm(null, null, cats, { roomId: done.roomId, locId: done.locId })
+    fresh.status = touchedRef.current ? f.status : (locations.find(x => x.id === done.locId)?.default_status === 'open' ? 'open' : 'closed')
+    setF(fresh)
     setImgs({ front: { ...blank }, back: { ...blank }, side: { ...blank } })
     setMsg('')
     setError('')
@@ -1629,7 +1631,7 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
         <input type="number" min={edit ? 0 : 1} placeholder="Anzahl" value={f.quantity} onChange={e => set('quantity', e.target.value)} />
       </div>
       {f.status === 'open' && (
-        <select value={f.fill_percent} onChange={e => { touchedRef.current = true; set('fill_percent', e.target.value) }}>
+        <select value={f.fill_percent} onChange={e => set('fill_percent', e.target.value)}>
           {[100, 90, 75, 50, 25, 10].map(v => <option key={v} value={v}>Füllstand {v} %</option>)}
         </select>
       )}
