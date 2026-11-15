@@ -5,6 +5,7 @@ import { lsGet, lsSet } from './utils'
 const SR = typeof window !== 'undefined' ? (window.SpeechRecognition || window.webkitSpeechRecognition) : null
 const HINTS = ['Wie viele trockenen Wermut habe ich noch?', 'Welchen Rye über 45 % habe ich da?', 'Habe ich noch Cynar offen?', 'Der Cynar ist leer.', 'Setz Rittenhouse Rye auf die Einkaufsliste.', 'Was kann ich aus meinen Videos mixen?']
 
+const RATES = [1, 1.2, 1.4, 1.6, 1.8]
 const speakable = t => String(t || '').replace(/[*_`#>]/g, '').replace(/\s+/g, ' ').trim()
 
 async function callFn(body) {
@@ -31,6 +32,8 @@ export default function Chat({ hidden, onOpenBottle, reload }) {
   const [notes, setNotes] = useState([])
   const [newNote, setNewNote] = useState('')
   const [noteErr, setNoteErr] = useState('')
+  const [rate, setRate] = useState(() => { const r = parseFloat(lsGet('chat_rate')); return RATES.includes(r) ? r : 1.4 })
+  const rateRef = useRef(rate)
   const ttsRef = useRef(tts)
   const convRef = useRef(conv)
   const recRef = useRef(null)
@@ -41,6 +44,7 @@ export default function Chat({ hidden, onOpenBottle, reload }) {
   const openRef = useRef(false)
 
   useEffect(() => { ttsRef.current = tts; lsSet('chat_tts', tts ? '1' : '0'); if (!tts) stopSpeak() }, [tts])
+  useEffect(() => { rateRef.current = rate; lsSet('chat_rate', String(rate)) }, [rate])
   useEffect(() => { convRef.current = conv; lsSet('chat_conv', conv ? '1' : '0') }, [conv])
   useEffect(() => { msgsRef.current = msgs; endRef.current?.scrollIntoView({ block: 'end' }) }, [msgs])
   useEffect(() => { openRef.current = open; if (!open) { stopSpeak(); stopListen() } }, [open])
@@ -57,6 +61,7 @@ export default function Chat({ hidden, onOpenBottle, reload }) {
       window.speechSynthesis.cancel()
       const u = new SpeechSynthesisUtterance(speakable(text))
       u.lang = 'de-DE'
+      u.rate = rateRef.current
       const v = window.speechSynthesis.getVoices().find(x => x.lang && x.lang.toLowerCase().startsWith('de'))
       if (v) u.voice = v
       u.onstart = () => setSpeaking(true)
@@ -217,6 +222,7 @@ export default function Chat({ hidden, onOpenBottle, reload }) {
         <strong>Bar-Assistent</strong>
         <span className="chat-tools">
           <button className={tts ? 'on' : ''} onClick={() => setTts(v => !v)}>{tts ? 'Ton an' : 'Stumm'}</button>
+          {tts && <button onClick={() => setRate(r => RATES[(RATES.indexOf(r) + 1) % RATES.length])} title="Sprechtempo ändern">Tempo {String(rate).replace('.', ',')}×</button>}
           {SR && <button className={conv ? 'on' : ''} onClick={() => setConv(v => !v)} title="Nach jeder Antwort automatisch wieder zuhören">Gespräch</button>}
           <button className={notesOpen ? 'on' : ''} onClick={toggleNotes}>Merkliste</button>
           {speaking && <button className="stop" onClick={stopSpeak}>Stopp</button>}
