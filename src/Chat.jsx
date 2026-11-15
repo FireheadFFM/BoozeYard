@@ -71,6 +71,13 @@ export default function Chat({ hidden, onOpenBottle, reload }) {
     } catch { /* ignorieren */ }
   }
 
+  // Neues Gespräch: Verlauf leeren (der Assistent sieht dann nur noch die nächste Frage)
+  function resetChat() {
+    stopSpeak(); stopListen()
+    setMsgs([]); msgsRef.current = []
+    setInput('')
+  }
+
   function stopListen() {
     try { recRef.current?.stop() } catch { /* ignorieren */ }
     recRef.current = null
@@ -226,6 +233,7 @@ export default function Chat({ hidden, onOpenBottle, reload }) {
           {SR && <button className={conv ? 'on' : ''} onClick={() => setConv(v => !v)} title="Nach jeder Antwort automatisch wieder zuhören">Gespräch</button>}
           <button className={notesOpen ? 'on' : ''} onClick={toggleNotes}>Merkliste</button>
           {speaking && <button className="stop" onClick={stopSpeak}>Stopp</button>}
+          {msgs.length > 0 && !busy && <button onClick={resetChat} title="Verlauf leeren und neu beginnen">Neu</button>}
           <button onClick={() => setOpen(false)}>Schließen</button>
         </span>
       </div>
