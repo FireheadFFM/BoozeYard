@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from './supabase'
 import { BUCKET, STATUS, normKey, digitsOnly, codeVariants, lsGet, lsSet, resizeImage } from './utils'
-import { decodeFromFile, runAnalyze, aiToPrefill, ensureRoom, ensureLocation, ensureLookup } from './shared'
+import { decodeFromFile, runAnalyze, aiToPrefill, ensureRoom, ensureLocation, ensureLookup, clearReorderFor } from './shared'
 
 /* ---------- Zwischenspeicher auf dem Handy (IndexedDB) ---------- */
 // Damit ein Neuladen der App angefangene Fotos nicht vernichtet.
@@ -385,6 +385,7 @@ export default function Schnell({ userId, bottles, cats, rooms, locations, looku
             const { error: e1 } = await supabase.from('bottles').update({ quantity: target.quantity + qty }).eq('id', target.id)
             if (e1) throw e1
             await supabase.from('movements').insert({ bottle_id: target.id, type: 'adjustment', quantity: qty, notes: 'Erfassung' })
+            await clearReorderFor(bottles, target)
             if (!target.image_front) {
               try { await uploadImages(target.id, c.members[0].blobs, false) } catch (e) { imageFails.push(`${c.brand} ${c.name}: ${e.message}`) }
             }
@@ -429,6 +430,7 @@ export default function Schnell({ userId, bottles, cats, rooms, locations, looku
           const { data, error: e1 } = await supabase.from('bottles').insert(row).select('id').single()
           if (e1) throw e1
           await supabase.from('movements').insert({ bottle_id: data.id, type: 'adjustment', quantity: qty, notes: 'Erfassung' })
+          if (c.bstatus === 'closed') await clearReorderFor(bottles, row)
           created++
           pieces += qty
           try { await uploadImages(data.id, c.members[0].blobs, false) } catch (e) { imageFails.push(`${row.brand} ${row.name}: ${e.message}`) }

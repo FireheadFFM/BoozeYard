@@ -5,7 +5,7 @@ import {
   digitsOnly, codeVariants, codeWarning, lookupBarcode, resizeImage,
   productKey, stockGroups,
 } from './utils'
-import { createDetector, decodeFromFile, runAnalyze, ensureLookup, aiToPrefill, ensureRoom, ensureLocation } from './shared'
+import { createDetector, decodeFromFile, runAnalyze, ensureLookup, aiToPrefill, ensureRoom, ensureLocation, clearReorderFor } from './shared'
 import Schnell from './Schnell'
 import Chat from './Chat'
 import Einkauf from './Einkauf'
@@ -239,6 +239,7 @@ function Main({ userId, onLogout }) {
     const { error: e1 } = await supabase.from('bottles').update({ quantity: b.quantity + 1 }).eq('id', b.id)
     if (e1) { setDup(null); return setError('Fehler: ' + e1.message) }
     await supabase.from('movements').insert({ bottle_id: b.id, type: 'adjustment', quantity: 1, notes: 'Per Scan hinzugefügt' })
+    await clearReorderFor(bottles, b)
     setDupMsg(`${b.brand} ${b.name}: jetzt ${b.quantity + 1}× geschlossen.`)
     setDup(null)
     loadAll()
@@ -590,7 +591,7 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit })
   // Leer rückgängig: Flasche war fast leer, daher zurück auf "offen" mit 10 %
   async function undoEmpty(b) {
     setMsg('')
-    const { error } = await supabase.from('bottles').update({ status: 'open', fill_percent: 10 }).eq('id', b.id)
+    const { error } = await supabase.from('bottles').update({ status: 'open', fill_percent: 10, reorder: false }).eq('id', b.id)
     if (error) return fail(error)
     await supabase.from('movements').insert({ bottle_id: b.id, type: 'adjustment', quantity: 1, notes: 'Leer rückgängig' })
     reload()
@@ -1489,6 +1490,7 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
 
       const { data, error: e1 } = await supabase.from('bottles').insert(row).select('id').single()
       if (e1) throw e1
+      if (row.status === 'closed') await clearReorderFor(bottles, row)
       await supabase.from('movements').insert({
         bottle_id: data.id,
         type: f.is_purchase ? 'purchase' : 'adjustment',
@@ -1632,7 +1634,7 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
       <input placeholder="Jahrgang (optional)" value={f.vintage} onChange={e => set('vintage', e.target.value)} />
 
       <div className="two">
-        <select value={f.status} onChange={e => { touchedRef.current = true; set('status', e.target.value) }}>
+        <select value={f.status} onChange={e => { touchedRef.current = true; const v = e.target.value; setF(prev => ({ ...prev, status: v, ...(edit && bottle.status === 'empty' && v !== 'empty' ? { reorder: false } : {}) })) }}>
           {Object.entries(STATUS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
         </select>
         <input type="number" min={edit ? 0 : 1} placeholder="Anzahl" value={f.quantity} onChange={e => set('quantity', e.target.value)} />

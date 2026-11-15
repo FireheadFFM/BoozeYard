@@ -1,5 +1,5 @@
 import { supabase } from './supabase'
-import { resizeImage, blobToBase64 } from './utils'
+import { resizeImage, blobToBase64, productKey } from './utils'
 
 // Gemeinsame Hilfsfunktionen für Formular, Scanner und Foto-Schnellerfassung
 
@@ -141,3 +141,11 @@ export async function ensureLocation(locations, roomId, name) {
   return data.id
 }
 
+
+// Kommt eine geschlossene Flasche eines Produkts dazu: "Nachkaufen"-Vormerkung aller Einträge dieses Produkts entfernen
+export async function clearReorderFor(bottles, ref) {
+  const key = productKey(ref)
+  const ids = bottles.filter(x => x.reorder && productKey(x) === key).map(x => x.id)
+  if (ids.length === 0) return
+  await supabase.from('bottles').update({ reorder: false }).in('id', ids)
+}
