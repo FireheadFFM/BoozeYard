@@ -473,6 +473,8 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, lastIn = {}, relo
   const [infoId, setInfoId] = useState(null)
   const [sortBy, setSortBy] = useState(() => (lsGet('sort') === 'recent' ? 'recent' : 'name'))
   const [emptyAsk, setEmptyAsk] = useState(null)
+  const [openAsk, setOpenAsk] = useState(null)     // { b, roomId, locId }: Ziel der geöffneten Flasche wählen
+  const [undoAsk, setUndoAsk] = useState(null)     // { b, cands }: zu welchem Stapel zurück
   useEffect(() => { setLimit(60) }, [q, catId, status, roomId, locId, sortBy])
 
   const catById = useMemo(() => Object.fromEntries(cats.map(c => [c.id, c])), [cats])
@@ -545,30 +547,50 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, lastIn = {}, relo
     await reload()
   }
 
-  async function openOne(b) {
+  // Öffnen: erst fragen, wohin die geöffnete Flasche kommt (offene Flaschen stehen meist woanders als der Stapel)
+  function askOpen(b) {
+    const roomOk = id => rooms.some(r => r.id === id)
+    const locOk = (rid, lid) => locations.some(l => l.id === lid && l.room_id === rid)
+    let roomId = lsGet('open_room') || ''
+    let locId = lsGet('open_loc') || ''
+    if (!roomOk(roomId) || (locId && !locOk(roomId, locId))) {
+      const def = locations.find(l => l.default_status === 'open' && roomOk(l.room_id))
+      roomId = def ? def.room_id : (b.room_id || '')
+      locId = def ? def.id : (b.location_id || '')
+    }
+    setOpenAsk({ b, roomId, locId })
+  }
+
+  async function openOne(b, place) {
     setMsg('')
+    setOpenAsk(null)
+    const where = place ? { room_id: place.roomId || null, location_id: place.locId || null } : {}
     if (b.quantity > 1) {
       const { error: e1 } = await supabase.from('bottles').update({ quantity: b.quantity - 1 }).eq('id', b.id)
       if (e1) return fail(e1)
       const { id, created_at, updated_at, user_id, captured_at, image_front, image_back, image_side, image_thumb, ...copy } = b
-      const { error: e2 } = await supabase.from('bottles').insert({ ...copy, status: 'open', quantity: 1, fill_percent: 100 })
+      const { error: e2 } = await supabase.from('bottles').insert({ ...copy, ...where, status: 'open', quantity: 1, fill_percent: 100 })
       if (e2) return fail(e2)
     } else {
-      const { error: e1 } = await supabase.from('bottles').update({ status: 'open', fill_percent: 100 }).eq('id', b.id)
+      const { error: e1 } = await supabase.from('bottles').update({ status: 'open', fill_percent: 100, ...where }).eq('id', b.id)
       if (e1) return fail(e1)
     }
     await supabase.from('movements').insert({ bottle_id: b.id, type: 'opened', quantity: -1 })
     reload()
   }
 
-  // Öffnen rückgängig: zurück in den Stapel, falls es dort noch gleiche geschlossene Flaschen gibt
-  async function undoOpen(b) {
+  // Öffnen rückgängig: zurück in einen geschlossenen Stapel desselben Produkts (egal an welchem Ort).
+  // Gibt es mehrere Stapel, wird gefragt; gibt es keinen, bleibt die Flasche als geschlossene am jetzigen Ort.
+  function undoOpen(b) {
     setMsg('')
-    const same = x => x.id !== b.id && x.status === 'closed' && x.brand === b.brand && x.name === b.name &&
-      x.size_ml === b.size_ml && x.category_id === b.category_id && x.room_id === b.room_id &&
-      x.location_id === b.location_id && (x.vintage || '') === (b.vintage || '') &&
-      (x.abv ?? null) === (b.abv ?? null)
-    const sib = b.quantity === 1 ? bottles.find(same) : null
+    const key = productKey(b)
+    const cands = b.quantity === 1 ? bottles.filter(x => x.id !== b.id && x.status === 'closed' && productKey(x) === key) : []
+    if (cands.length > 1) { setUndoAsk({ b, cands }); return }
+    doUndoOpen(b, cands[0] || null)
+  }
+
+  async function doUndoOpen(b, sib) {
+    setUndoAsk(null)
     let targetId = b.id
     if (sib) {
       const { error: e1 } = await supabase.from('bottles').update({ quantity: sib.quantity + 1 }).eq('id', sib.id)
@@ -722,6 +744,56 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, lastIn = {}, relo
           )}
         </div>
       )}
+      {openAsk && (() => {
+        const ob = openAsk.b
+        const ols = locations.filter(l => l.room_id === openAsk.roomId)
+        const here = [roomById[ob.room_id]?.name, locById[ob.location_id]?.name].filter(Boolean).join(' › ') || 'ohne Ort'
+        const confirmOpen = () => {
+          if (openAsk.roomId) lsSet('open_room', openAsk.roomId)
+          lsSet('open_loc', openAsk.locId || '')
+          openOne(ob, { roomId: openAsk.roomId, locId: openAsk.locId })
+        }
+        return (
+          <div className="ask-back" onClick={() => setOpenAsk(null)}>
+            <div className="ask-card" onClick={e => e.stopPropagation()}>
+              <h3>Wohin kommt die Flasche?</h3>
+              <p><b>{ob.brand} {ob.name}</b> wird geöffnet. Bisher: {here}{ob.quantity > 1 ? `, ${ob.quantity}× geschlossen` : ''}.</p>
+              <label className="fld"><span>Raum</span>
+                <select value={openAsk.roomId} onChange={e => setOpenAsk({ ...openAsk, roomId: e.target.value, locId: '' })}>
+                  <option value="">– kein Raum –</option>
+                  {rooms.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
+                </select>
+              </label>
+              <label className="fld"><span>Ort</span>
+                <select value={openAsk.locId} onChange={e => setOpenAsk({ ...openAsk, locId: e.target.value })} disabled={!openAsk.roomId || ols.length === 0}>
+                  <option value="">{ols.length === 0 ? '–' : '– kein Ort –'}</option>
+                  {ols.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
+                </select>
+              </label>
+              <button className="save-btn" onClick={confirmOpen}>Öffnen und dorthin stellen</button>
+              <button className="ghost-btn" style={{ marginTop: 0 }} onClick={() => openOne(ob, null)}>Öffnen, am alten Ort lassen</button>
+              <button className="link-back" onClick={() => setOpenAsk(null)}>Abbrechen</button>
+            </div>
+          </div>
+        )
+      })()}
+      {undoAsk && (() => {
+        const ub = undoAsk.b
+        const placeOf = x => [roomById[x.room_id]?.name, locById[x.location_id]?.name].filter(Boolean).join(' › ') || 'ohne Ort'
+        return (
+          <div className="ask-back" onClick={() => setUndoAsk(null)}>
+            <div className="ask-card" onClick={e => e.stopPropagation()}>
+              <h3>Zu welchem Stapel zurück?</h3>
+              <p><b>{ub.brand} {ub.name}</b> gibt es geschlossen an mehreren Orten.</p>
+              <div className="ask-reserve">
+                {undoAsk.cands.map(x => <button type="button" key={x.id} onClick={() => doUndoOpen(ub, x)}>{x.quantity}× geschlossen · {placeOf(x)}</button>)}
+              </div>
+              <button className="ghost-btn" style={{ marginTop: 0 }} onClick={() => doUndoOpen(ub, null)}>Geschlossen hier lassen ({placeOf(ub)})</button>
+              <button className="link-back" onClick={() => setUndoAsk(null)}>Abbrechen</button>
+            </div>
+          </div>
+        )
+      })()}
       {emptyAsk && (() => {
         const eb = emptyAsk
         const g = groups.get(productKey(eb))
@@ -820,7 +892,7 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, lastIn = {}, relo
             </div>
             {delId !== b.id && !selMode && (
               <div className="actions full">
-                {b.status === 'closed' && <button onClick={() => openOne(b)}>Öffnen</button>}
+                {b.status === 'closed' && <button onClick={() => askOpen(b)}>Öffnen</button>}
                 {b.status === 'open' && <button onClick={() => askEmpty(b)}>Leer</button>}
                 {b.status === 'open' && <button className="ghost" onClick={() => undoOpen(b)}>Zurück</button>}
                 {b.status === 'empty' && <button className="ghost" onClick={() => undoEmpty(b)}>Zurück</button>}
