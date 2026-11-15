@@ -362,6 +362,65 @@ function Main({ userId, onLogout }) {
   )
 }
 
+/* ---------- Info-Kachel zu einer Flasche (nur lesen) ---------- */
+
+const eurFmt = n => Number(n).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' })
+
+function BottleInfo({ b, thumb, place, cat, group, onClose, onEdit, onGallery }) {
+  const label = abvLabel(b.abv)
+  const rows = [
+    ['Kategorie', cat],
+    ['Alkohol', b.abv !== null && b.abv !== undefined ? `${String(b.abv).replace('.', ',')} %${label && label !== 'Standard' ? ` · ${label}` : ''}` : ''],
+    ['Größe', b.size_ml ? `${b.size_ml} ml` : ''],
+    ['Jahrgang', b.vintage],
+    ['Land', b.country],
+    ['Region / Stil', b.region],
+    ['Status', `${STATUS[b.status]}${b.quantity > 1 ? ` · ×${b.quantity}` : ''}`],
+    ['Ort', place],
+    ['Letzter Preis', b.last_price !== null && b.last_price !== undefined ? eurFmt(b.last_price) : ''],
+    ['Mindestbestand', b.min_stock ? String(b.min_stock) : ''],
+    ['Barcode', b.barcode],
+    ['Erfasst', b.created_at ? new Date(b.created_at).toLocaleDateString('de-DE') : ''],
+  ].filter(r => r[1])
+  return (
+    <div className="info-back" onClick={onClose}>
+      <div className="info-card" role="dialog" aria-label="Flaschen-Info" onClick={e => e.stopPropagation()}>
+        <div className="info-head">
+          <div className={'card-icon' + (thumb ? ' has-thumb zoomable' : '')} onClick={thumb ? onGallery : undefined}>
+            {thumb ? <img className="thumb" src={thumb} alt="" /> : <BottleIcon />}
+          </div>
+          <div className="info-title">
+            <h3>{b.brand} {b.name}</h3>
+            <div className="tags">
+              {b.is_collection && <span className="tag">Sammlung</span>}
+              {b.is_sample && <span className="tag">Sample</span>}
+              {b.reorder && <span className="tag warn">Vorgemerkt</span>}
+            </div>
+          </div>
+          <button type="button" className="info-x" aria-label="Schließen" onClick={onClose}>×</button>
+        </div>
+        {b.status === 'open' && (
+          <div className="fill-row info-fill">
+            <div className="fill-bar"><div className="fill-bar-inner" style={{ width: `${b.fill_percent}%` }} /></div>
+            <span>{b.fill_percent} %</span>
+          </div>
+        )}
+        <div className="info-grid">
+          {rows.map(([k, v]) => <div key={k}><span>{k}</span><b>{v}</b></div>)}
+          {group && group.entries.length > 1 && (
+            <div className="wide"><span>Dieses Produkt insgesamt</span><b>{group.closed} geschlossen{group.open > 0 ? `, ${group.open} offen` : ''}</b></div>
+          )}
+          {b.notes && <div className="wide"><span>Notiz</span><b>{b.notes}</b></div>}
+        </div>
+        <div className="info-btns">
+          <button type="button" className="scan-btn" onClick={onEdit}>Bearbeiten</button>
+          <button type="button" className="scan-btn secondary" onClick={onClose}>Schließen</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 /* ---------- Bestandsliste mit Suche und Filtern ---------- */
 
 function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit }) {
@@ -381,6 +440,7 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit })
   const [mvBusy, setMvBusy] = useState(false)
   const [moved, setMoved] = useState('')
   const [limit, setLimit] = useState(60)
+  const [infoId, setInfoId] = useState(null)
   useEffect(() => { setLimit(60) }, [q, catId, status, roomId, locId])
 
   const catById = useMemo(() => Object.fromEntries(cats.map(c => [c.id, c])), [cats])
@@ -607,6 +667,20 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit })
         </div>
       )}
       {gallery && <Lightbox images={gallery.images} onClose={() => setGallery(null)} />}
+      {(() => {
+        const ib = infoId ? bottles.find(x => x.id === infoId) : null
+        if (!ib) return null
+        const sub = catById[ib.category_id]
+        const main = mainOf(ib)
+        return (
+          <BottleInfo b={ib} thumb={ib.image_thumb ? thumbs[ib.image_thumb] : null}
+            place={[roomById[ib.room_id]?.name, locById[ib.location_id]?.name].filter(Boolean).join(' › ')}
+            cat={[main?.name, sub && sub.id !== main?.id ? sub.name : null].filter(Boolean).join(' · ')}
+            group={groups.get(productKey(ib))}
+            onClose={() => setInfoId(null)} onEdit={() => { setInfoId(null); onEdit(ib.id) }}
+            onGallery={() => openGallery(ib)} />
+        )
+      })()}
 
       {filtered.length === 0 && (
         <div className="empty">{bottles.length === 0 ? 'Noch keine Flaschen eingetragen.' : 'Keine Treffer für diese Filter.'}</div>
@@ -632,7 +706,9 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, reload, onEdit })
               {thumb ? <img className="thumb" src={thumb} alt="" loading="lazy" /> : <BottleIcon />}
             </div>
             <div className="card-info">
-              <h3>{b.brand} {b.name}{b.vintage ? ` (${b.vintage})` : ''}</h3>
+              <h3 className="name-link" role="button" tabIndex={0} title="Details anzeigen"
+                onClick={() => { if (!selMode) setInfoId(b.id) }}
+                onKeyDown={e => { if (e.key === 'Enter' && !selMode) setInfoId(b.id) }}>{b.brand} {b.name}{b.vintage ? ` (${b.vintage})` : ''}</h3>
               <p>
                 {[main?.name, sub && sub.id !== main?.id ? sub.name : null].filter(Boolean).join(' · ')}
                 {b.abv !== null ? ` · ${b.abv} %` : ''}{` · ${b.size_ml} ml`}
