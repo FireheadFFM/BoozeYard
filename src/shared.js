@@ -62,7 +62,7 @@ export async function runAnalyze(files, cats, lookups) {
   const mains = cats.filter(c => !c.parent_id)
   const images = []
   for (const file of files) {
-    const blob = await resizeImage(file, 1200, 0.8)
+    const blob = await resizeCached(file, 1200, 0.8)
     images.push({ media_type: 'image/jpeg', data: await blobToBase64(blob) })
   }
   const taxonomy = {
@@ -148,4 +148,25 @@ export async function clearReorderFor(bottles, ref) {
   const ids = bottles.filter(x => x.reorder && productKey(x) === key).map(x => x.id)
   if (ids.length === 0) return
   await supabase.from('bottles').update({ reorder: false }).in('id', ids)
+}
+
+// Verkleinerte Bilder merken: jede Datei wird pro Größe nur einmal umgerechnet (Auswertung, Upload und Vorschaubild teilen sich das)
+const resizeMemo = new WeakMap()
+export function resizeCached(file, maxSide, quality) {
+  let m = resizeMemo.get(file)
+  if (!m) { m = new Map(); resizeMemo.set(file, m) }
+  const k = `${maxSide}-${quality}`
+  if (!m.has(k)) {
+    const p = resizeImage(file, maxSide, quality)
+    p.catch(() => m.delete(k))
+    m.set(k, p)
+  }
+  return m.get(k)
+}
+
+// Direkt nach dem Fotografieren im Leerlauf vorrechnen, damit Auswertung und Speichern nicht darauf warten
+export function warmImage(file, withThumb) {
+  resizeCached(file, 1200, 0.8).catch(() => {})
+  resizeCached(file, 1000, 0.8).catch(() => {})
+  if (withThumb) resizeCached(file, 240, 0.7).catch(() => {})
 }

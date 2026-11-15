@@ -2,10 +2,10 @@ import { useState, useEffect, useMemo, useRef } from 'react'
 import { supabase } from './supabase'
 import {
   SIZES, STATUS, BUCKET, APP_VERSION, fetchAll, lsGet, lsSet, abvLabel,
-  digitsOnly, codeVariants, codeWarning, lookupBarcode, resizeImage,
+  digitsOnly, codeVariants, codeWarning, lookupBarcode,
   productKey, stockGroups,
 } from './utils'
-import { createDetector, decodeFromFile, runAnalyze, ensureLookup, aiToPrefill, ensureRoom, ensureLocation, clearReorderFor } from './shared'
+import { createDetector, decodeFromFile, runAnalyze, ensureLookup, aiToPrefill, ensureRoom, ensureLocation, clearReorderFor, resizeCached, warmImage } from './shared'
 import Schnell from './Schnell'
 import Chat from './Chat'
 import Einkauf from './Einkauf'
@@ -1249,6 +1249,7 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
   }, [lookups, f.country, f.region])
 
   function pickImage(slot, file) {
+    warmImage(file, slot === 'front')
     setImgs(prev => ({ ...prev, [slot]: { ...prev[slot], file, preview: URL.createObjectURL(file), removed: false } }))
   }
   function removeImage(slot) {
@@ -1267,20 +1268,24 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
   async function syncImages(bottleId) {
     const update = {}
     const toDelete = []
+    const stamp = Date.now()
+    const upload = async (path, file, maxSide, quality) => {
+      const blob = await resizeCached(file, maxSide, quality)
+      const up = await supabase.storage.from(BUCKET).upload(path, blob, { contentType: 'image/jpeg' })
+      if (up.error) throw up.error
+    }
+    // Alle Bilder (und das Vorschaubild) gleichzeitig hochladen statt nacheinander
+    const jobs = []
     for (const [slot] of SLOTS) {
       const s = imgs[slot]
       if (s.file) {
-        const blob = await resizeImage(s.file, 1000, 0.8)
-        const path = `${userId}/${bottleId}/${slot}-${Date.now()}.jpg`
-        const up = await supabase.storage.from(BUCKET).upload(path, blob, { contentType: 'image/jpeg' })
-        if (up.error) throw up.error
+        const path = `${userId}/${bottleId}/${slot}-${stamp}.jpg`
+        jobs.push(upload(path, s.file, 1000, 0.8))
         update[`image_${slot}`] = path
         if (s.path) toDelete.push(s.path)
         if (slot === 'front') {
-          const thumb = await resizeImage(s.file, 240, 0.7)
-          const tpath = `${userId}/${bottleId}/thumb-${Date.now()}.jpg`
-          const tu = await supabase.storage.from(BUCKET).upload(tpath, thumb, { contentType: 'image/jpeg' })
-          if (tu.error) throw tu.error
+          const tpath = `${userId}/${bottleId}/thumb-${stamp}.jpg`
+          jobs.push(upload(tpath, s.file, 240, 0.7))
           update.image_thumb = tpath
           if (bottle?.image_thumb) toDelete.push(bottle.image_thumb)
         }
@@ -1293,6 +1298,7 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
         }
       }
     }
+    await Promise.all(jobs)
     if (Object.keys(update).length > 0) {
       const { error } = await supabase.from('bottles').update(update).eq('id', bottleId)
       if (error) throw error
@@ -1490,16 +1496,19 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
 
       const { data, error: e1 } = await supabase.from('bottles').insert(row).select('id').single()
       if (e1) throw e1
-      if (row.status === 'closed') await clearReorderFor(bottles, row)
-      await supabase.from('movements').insert({
-        bottle_id: data.id,
-        type: f.is_purchase ? 'purchase' : 'adjustment',
-        quantity: qty,
-        notes: f.is_purchase ? null : 'Erfassung',
-      })
-
+      // Buchung, Vormerkung und Bilder laufen gleichzeitig
+      const bookP = Promise.all([
+        row.status === 'closed' ? clearReorderFor(bottles, row) : null,
+        supabase.from('movements').insert({
+          bottle_id: data.id,
+          type: f.is_purchase ? 'purchase' : 'adjustment',
+          quantity: qty,
+          notes: f.is_purchase ? null : 'Erfassung',
+        }),
+      ])
       let imageProblem = ''
-      try { await syncImages(data.id) } catch (e) { imageProblem = ' Die Bilder konnten nicht hochgeladen werden: ' + e.message }
+      const imgP = syncImages(data.id).catch(e => { imageProblem = ' Die Bilder konnten nicht hochgeladen werden: ' + e.message })
+      await Promise.all([bookP, imgP])
 
       onSeries && onSeries(roomId, locationId || '', { touched: touchedRef.current, status: f.status })
       setDone({ title: `${row.brand} ${row.name}`, roomId, locId: locationId || '', imageProblem })

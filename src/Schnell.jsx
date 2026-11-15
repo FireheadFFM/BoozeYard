@@ -327,22 +327,26 @@ export default function Schnell({ userId, bottles, cats, rooms, locations, looku
 
   async function uploadImages(bottleId, blobs, skipThumb) {
     const update = {}
+    const stamp = Date.now()
+    const put = async (path, blob, maxSide, quality) => {
+      const small = await resizeImage(blob, maxSide, quality)
+      const up = await supabase.storage.from(BUCKET).upload(path, small, { contentType: 'image/jpeg' })
+      if (up.error) throw up.error
+    }
+    const jobs = []
     for (const [slot] of SLOT_LIST) {
       const b = blobs[slot]
       if (!b) continue
-      const small = await resizeImage(b, 1000, 0.8)
-      const path = `${userId}/${bottleId}/${slot}-${Date.now()}.jpg`
-      const up = await supabase.storage.from(BUCKET).upload(path, small, { contentType: 'image/jpeg' })
-      if (up.error) throw up.error
+      const path = `${userId}/${bottleId}/${slot}-${stamp}.jpg`
+      jobs.push(put(path, b, 1000, 0.8))
       update[`image_${slot}`] = path
       if (slot === 'front' && !skipThumb) {
-        const thumb = await resizeImage(b, 240, 0.7)
-        const tpath = `${userId}/${bottleId}/thumb-${Date.now()}.jpg`
-        const tu = await supabase.storage.from(BUCKET).upload(tpath, thumb, { contentType: 'image/jpeg' })
-        if (tu.error) throw tu.error
+        const tpath = `${userId}/${bottleId}/thumb-${stamp}.jpg`
+        jobs.push(put(tpath, b, 240, 0.7))
         update.image_thumb = tpath
       }
     }
+    await Promise.all(jobs)
     if (Object.keys(update).length > 0) {
       const { error: e } = await supabase.from('bottles').update(update).eq('id', bottleId)
       if (e) throw e
