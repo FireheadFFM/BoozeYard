@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from './supabase'
 import { resizeImage, blobToBase64, digitsOnly, codeVariants, lsGet, lsSet } from './utils'
+import { ensureRoom, ensureLocation } from './shared'
 
 const norm = s => String(s ?? '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]/g, '')
 const sameText = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase()
@@ -34,6 +35,8 @@ export default function Lieferung({ bottles, cats, rooms, locations, lookups, re
   const [items, setItems] = useState([])
   const [roomId, setRoomId] = useState(lsGet('deliv_room') || '')
   const [locId, setLocId] = useState(lsGet('deliv_loc') || '')
+  const [newRoom, setNewRoom] = useState('')
+  const [newLoc, setNewLoc] = useState('')
   const [result, setResult] = useState(null)
   const [dupInv, setDupInv] = useState([])      // schon gebuchte Lieferungen mit gleicher Rechnungsnummer
   const [dupAck, setDupAck] = useState(false)
@@ -147,12 +150,21 @@ export default function Lieferung({ bottles, cats, rooms, locations, lookups, re
       if (it.mode === 'new' && !it.catId) return setError(`Bitte eine Kategorie wählen: ${it.brand} ${it.name}.`)
     }
     if (needsPlace && !roomId) return setError('Bitte einen Raum für neue Flaschen wählen.')
-    if (needsPlace && roomLocs.length > 0 && !locId) return setError('Bitte einen Ort für neue Flaschen wählen.')
+    if (needsPlace && roomId === '__new' && !newRoom.trim()) return setError('Bitte den Namen des neuen Raums eintragen.')
+    if (needsPlace && locId === '__new' && !newLoc.trim()) return setError('Bitte den Namen des neuen Ortes eintragen.')
+    if (needsPlace && roomId !== '__new' && roomLocs.length > 0 && !locId) return setError('Bitte einen Ort für neue Flaschen wählen.')
 
     setBusy(true)
-    let ok = 0, created = 0, added = 0
+    let ok = 0, created = 0, added = 0, revived = 0
     const fails = []
+    const madePlace = []
     try {
+      // Neuer Raum und Ort werden erst jetzt angelegt, damit bei Abbruch nichts übrig bleibt
+      let useRoom = roomId
+      let useLoc = locId
+      if (needsPlace && roomId === '__new') { useRoom = await ensureRoom(rooms, newRoom.trim()); madePlace.push(`Raum „${newRoom.trim()}“`) }
+      if (needsPlace && locId === '__new') { useLoc = await ensureLocation(locations, useRoom, newLoc.trim()); madePlace.push(`Ort „${newLoc.trim()}“`) }
+
       const price = v => (v === '' || v === null || v === undefined ? null : parseFloat(String(v).replace(',', '.')))
       const { data: del, error: de } = await supabase.from('deliveries').insert({
         supplier: head.supplier.trim() || null,
@@ -182,11 +194,22 @@ export default function Lieferung({ bottles, cats, rooms, locations, lookups, re
               added++
             }
           }
+          // Leerer Eintrag, kein geschlossener Stapel: den leeren Eintrag wieder befüllen statt ein Duplikat anzulegen (Fotos und Daten bleiben)
+          if (!targetId && m && m.status === 'empty') {
+            const { error: e3 } = await supabase.from('bottles').update({
+              status: 'closed', quantity: qty, fill_percent: 100, reorder: false,
+              room_id: useRoom, location_id: useLoc || null,
+              ...(p !== null ? { last_price: p } : {}), ...(it.sku ? { supplier_sku: it.sku } : {}),
+            }).eq('id', m.id)
+            if (e3) throw e3
+            targetId = m.id
+            revived++
+          }
           if (!targetId) {
             const src = m || {}
             const { data: row, error: e2 } = await supabase.from('bottles').insert({
               category_id: m ? m.category_id : it.catId,
-              room_id: roomId, location_id: locId || null,
+              room_id: useRoom, location_id: useLoc || null,
               brand: String(it.brand).trim(), name: String(it.name).trim(),
               vintage: (m ? m.vintage : it.vintage) || null,
               abv: m ? m.abv : (it.abv === '' ? null : parseFloat(String(it.abv).replace(',', '.'))),
@@ -207,9 +230,9 @@ export default function Lieferung({ bottles, cats, rooms, locations, lookups, re
           fails.push(`${label}: ${e.message}`)
         }
       }
-      if (needsPlace) { lsSet('deliv_room', roomId); lsSet('deliv_loc', locId) }
+      if (needsPlace) { lsSet('deliv_room', useRoom); lsSet('deliv_loc', useLoc) }
       await reload()
-      setResult({ ok, created, added, fails })
+      setResult({ ok, created, added, revived, madePlace, fails })
       setStage('done')
     } catch (e) {
       setError('Fehler beim Speichern: ' + e.message)
@@ -218,7 +241,7 @@ export default function Lieferung({ bottles, cats, rooms, locations, lookups, re
   }
 
   function reset() {
-    setStage('pick'); setFiles([]); setItems([]); setResult(null); setError(''); setDupInv([]); setDupAck(false)
+    setStage('pick'); setFiles([]); setItems([]); setResult(null); setError(''); setDupInv([]); setDupAck(false); setNewRoom(''); setNewLoc('')
     setHead({ supplier: '', invoice_no: '', date: '', total: '' })
   }
 
@@ -226,7 +249,11 @@ export default function Lieferung({ bottles, cats, rooms, locations, lookups, re
     return (
       <div className="panel">
         <h3>Lieferung verbucht</h3>
-        <div className="msg">{result.ok} Positionen: {result.created} neue Flaschen angelegt, {result.added} zum Bestand addiert.</div>
+        <div className="msg">
+          {result.ok} Positionen: {result.created} neue Flaschen angelegt, {result.added} zum Bestand addiert
+          {result.revived > 0 ? `, ${result.revived} leere ${result.revived === 1 ? 'Eintrag' : 'Einträge'} wieder befüllt` : ''}.
+          {result.madePlace.length > 0 && <><br />Neu angelegt: {result.madePlace.join(', ')}.</>}
+        </div>
         {result.fails.length > 0 && <div className="msg error">Nicht verbucht:<br />{result.fails.join('\n')}</div>}
         <p className="hint">Neue Flaschen sind ohne Fotos angelegt. Foto und Feinschliff geht über Bestand → Bearbeiten.</p>
         <button className="save-btn" onClick={reset}>Nächste Lieferung</button>
@@ -264,15 +291,19 @@ export default function Lieferung({ bottles, cats, rooms, locations, lookups, re
             <select value={roomId} onChange={e => { setRoomId(e.target.value); setLocId('') }}>
               <option value="">– wählen –</option>
               {rooms.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
+              <option value="__new">+ Neuer Raum…</option>
             </select>
           </label>
           <label className="fld"><span>Ort</span>
-            <select value={locId} onChange={e => setLocId(e.target.value)} disabled={!roomId || roomLocs.length === 0}>
+            <select value={locId} onChange={e => setLocId(e.target.value)} disabled={!roomId}>
               <option value="">{roomLocs.length === 0 ? '–' : '– wählen –'}</option>
               {roomLocs.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
+              {roomId && <option value="__new">+ Neuer Ort…</option>}
             </select>
           </label>
         </div>
+        {roomId === '__new' && <input placeholder="Name des neuen Raums" value={newRoom} onChange={e => setNewRoom(e.target.value)} />}
+        {locId === '__new' && <input placeholder="Name des neuen Ortes, z. B. Kiste 5" value={newLoc} onChange={e => setNewLoc(e.target.value)} />}
 
         <div className="count">{included.length} von {items.length} Positionen ausgewählt</div>
         {items.map(it => {
@@ -307,7 +338,11 @@ export default function Lieferung({ bottles, cats, rooms, locations, lookups, re
                         <>
                           <option value="new">Neue Flasche anlegen</option>
                           {cands.map(b => (
-                            <option key={b.id} value={b.id}>Zu „{b.brand} {b.name}“ {b.size_ml} ml ({b.status === 'closed' ? 'geschlossen' : b.status === 'open' ? 'offen' : 'leer'}, ×{b.quantity}) addieren</option>
+                            <option key={b.id} value={b.id}>
+                              {b.status === 'empty'
+                                ? `„${b.brand} ${b.name}“ ${b.size_ml} ml (leer) wieder befüllen`
+                                : `Zu „${b.brand} ${b.name}“ ${b.size_ml} ml (${b.status === 'closed' ? 'geschlossen' : 'offen'}, ×${b.quantity}) addieren`}
+                            </option>
                           ))}
                         </>
                       )
@@ -328,7 +363,8 @@ export default function Lieferung({ bottles, cats, rooms, locations, lookups, re
                       {(it.country || it.region) && <div className={'hint' + (guess('country') || guess('region') ? ' guess-t' : '')}>{[it.country, it.region].filter(Boolean).join(' · ')}</div>}
                     </>
                   )}
-                  {m && <div className="hint">Aktuell im Bestand: ×{m.quantity}{m.last_price ? `, letzter Preis ${eur(m.last_price)}` : ''}</div>}
+                  {m && m.status === 'empty' && !bottles.some(b => b.status === 'closed' && sameProduct(b, m)) && <div className="hint">Dieser Eintrag ist leer. Er wird wieder befüllt: geschlossen, Menge {it.quantity || 1}, Ort wie oben. Fotos und Daten bleiben erhalten.</div>}
+                  {m && <div className="hint">Aktuell im Bestand: ×{m.quantity}{m.status === 'empty' ? ' (leer)' : ''}{m.last_price ? `, letzter Preis ${eur(m.last_price)}` : ''}</div>}
                   {it.enriched.length > 0 && <div className="hint guess-t">Gelb markierte Angaben sind KI-Vorschläge aus Fachwissen, nicht vom Beleg. Bitte kurz prüfen.</div>}
                 </>
               )}

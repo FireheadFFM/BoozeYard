@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from 'react'
+import { useState, useEffect, useMemo, useRef, createContext, useContext } from 'react'
 import { supabase } from './supabase'
 import {
   SIZES, STATUS, BUCKET, APP_VERSION, fetchAll, lsGet, lsSet, abvLabel,
@@ -8,6 +8,7 @@ import {
 import { parsePlaceCode } from './qr'
 import { createDetector, pickCode, decodeFromFile, runAnalyze, ensureLookup, aiToPrefill, ensureRoom, ensureLocation, clearReorderFor, resizeCached, warmImage } from './shared'
 import Schnell from './Schnell'
+import Tasting from './Tasting'
 import Chat from './Chat'
 import Einkauf from './Einkauf'
 import Lieferung from './Lieferung'
@@ -133,6 +134,9 @@ function Login() {
     </form>
   )
 }
+
+// Ist der Reiter gerade sichtbar? (Erfassen und Tasting bleiben im Hintergrund erhalten, die Kamera darf dann nicht weiterlaufen)
+const TabActive = createContext(true)
 
 /* ---------- Hauptansicht ---------- */
 
@@ -331,8 +335,12 @@ function Main({ userId, onLogout }) {
     ['bottles', 'Bestand'],
     ['capture', 'Erfassen'],
     ['buy', 'Einkauf'],
+    ['tasting', 'Tasting'],
     ['admin', 'Verwaltung'],
   ]
+  // Erfassen und Tasting einmal geöffnet im Hintergrund behalten, damit beim Reiterwechsel nichts verloren geht
+  const seen = useRef(new Set())
+  seen.current.add(tab)
   const seriesPlace = series.roomId
     ? [rooms.find(r => r.id === series.roomId)?.name, locations.find(l => l.id === series.locId)?.name].filter(Boolean).join(' › ')
     : ''
@@ -342,7 +350,16 @@ function Main({ userId, onLogout }) {
     <Shell onLogout={onLogout}>
       <nav>
         {tabs.map(([id, label]) => (
-          <button key={id} onClick={() => { setTab(id); setEditId(null); setCapView(null); setDup(null); setDupMsg(''); setNotice(''); setPlaceReq(r => ({ key: 0, roomId: '', locId: '' })); if (id === 'admin') setAdminKey(k => k + 1); if (id === 'bottles' || id === 'admin') setSeries({ roomId: '', locId: '' }) }} className={tab === id ? 'active' : ''}>{label}</button>
+          <button key={id} onClick={() => {
+            const same = id === tab
+            setTab(id); setNotice(''); setPlaceReq({ key: 0, roomId: '', locId: '' })
+            // Erneut auf den offenen Reiter tippen: zurück zur Startansicht. Beim Wechsel bleibt der Stand erhalten.
+            if (same) {
+              setEditId(null); setCapView(null); setDup(null); setDupMsg('')
+              if (id === 'admin') setAdminKey(k => k + 1)
+              if (id === 'bottles' || id === 'admin') setSeries({ roomId: '', locId: '' })
+            }
+          }} className={tab === id ? 'active' : ''}>{label}</button>
         ))}
       </nav>
       <main>
@@ -357,7 +374,10 @@ function Main({ userId, onLogout }) {
           <BottleForm key={editing.id} userId={userId} bottle={editing} cats={cats} rooms={rooms}
             locations={locations} lookups={lookups} bottles={bottles} reload={loadAll} onDone={() => setEditId(null)} />
         )}
-        {tab === 'capture' && capView === null && (
+        {(tab === 'capture' || seen.current.has('capture')) && (
+          <TabActive.Provider value={tab === 'capture'}>
+            <div style={{ display: tab === 'capture' ? 'block' : 'none' }}>
+        {capView === null && (
           <>
             {dupMsg && <div className="msg">{dupMsg}</div>}
             {dup && (() => {
@@ -395,26 +415,36 @@ function Main({ userId, onLogout }) {
             </div>
           </>
         )}
-        {!loading && tab === 'capture' && capView === 'deliv' && (
+        {!loading && capView === 'deliv' && (
           <>
             <button className="link-back" onClick={() => setCapView(null)}>← Zurück zur Erfassung</button>
             <Lieferung bottles={bottles} cats={cats} rooms={rooms} locations={locations} lookups={lookups}
               reload={loadAll} onDone={() => { setCapView(null); setTab('bottles') }} />
           </>
         )}
-        {!loading && tab === 'capture' && capView === 'quick' && (
+        {!loading && capView === 'quick' && (
           <>
             <button className="link-back" onClick={() => setCapView(null)}>← Zurück zur Erfassung</button>
             <Schnell userId={userId} bottles={bottles} cats={cats} rooms={rooms} locations={locations} lookups={lookups}
               reload={loadAll} onDone={() => { setCapView(null); setTab('bottles') }} />
           </>
         )}
-        {!loading && tab === 'capture' && capView === 'form' && (
+        {!loading && capView === 'form' && (
           <BottleForm key={prefill.key} userId={userId} prefill={prefill.data} cats={cats} rooms={rooms}
             locations={locations} lookups={lookups} bottles={bottles} reload={loadAll}
             series={series} onSeries={(roomId, locId, extra) => setSeries({ roomId, locId, ...(extra || {}) })}
             onBack={() => setCapView(null)} onNext={() => setCapView(null)}
             onFinish={() => { setSeries({ roomId: '', locId: '' }); setCapView(null); setTab('bottles') }} />
+        )}
+            </div>
+          </TabActive.Provider>
+        )}
+        {!loading && (tab === 'tasting' || seen.current.has('tasting')) && (
+          <TabActive.Provider value={tab === 'tasting'}>
+            <div style={{ display: tab === 'tasting' ? 'block' : 'none' }}>
+              <Tasting userId={userId} cats={cats} lookups={lookups} wishlist={wishlist} reload={loadAll} />
+            </div>
+          </TabActive.Provider>
         )}
         {!loading && tab === 'buy' && <Einkauf bottles={bottles} wishlist={wishlist} reload={loadAll} />}
         {!loading && tab === 'admin' && (
@@ -511,6 +541,8 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, lastIn = {}, plac
   const [emptyAsk, setEmptyAsk] = useState(null)
   const [openAsk, setOpenAsk] = useState(null)     // { b, roomId, locId }: Ziel der geöffneten Flasche wählen
   const [undoAsk, setUndoAsk] = useState(null)     // { b, cands }: zu welchem Stapel zurück
+  const [mergeAsk, setMergeAsk] = useState(null)     // { keepId }: Einträge zusammenführen
+  const [mergeBusy, setMergeBusy] = useState(false)
   const [placeMode, setPlaceMode] = useState(false) // Orts-Ansicht (aus QR-Code): leere Flaschen ausgeblendet
   useEffect(() => { setLimit(60) }, [q, catId, status, roomId, locId, sortBy])
   useEffect(() => {
@@ -544,6 +576,70 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, lastIn = {}, plac
     setMsg('')
     await reload()
     setMoved(`${ids.length} ${ids.length === 1 ? 'Eintrag' : 'Einträge'} verschoben nach ${target}.`)
+  }
+
+  // ----- Einträge zusammenführen (z. B. Duplikate) -----
+  const selected = () => bottles.filter(b => sel.has(b.id))
+  function startMerge() {
+    const list = selected()
+    if (list.length < 2) return
+    const rank = { closed: 0, open: 1, empty: 2 }
+    const best = [...list].sort((a, b) => rank[a.status] - rank[b.status] || (b.image_front ? 1 : 0) - (a.image_front ? 1 : 0) || b.quantity - a.quantity)[0]
+    setMergeAsk({ keepId: best.id })
+  }
+  function mergePlan(keep, others) {
+    if (others.some(o => o.status === 'open')) return { error: 'Offene Flaschen haben jeweils einen eigenen Füllstand und lassen sich nicht zusammenführen. Bitte nur geschlossene und leere Einträge wählen.' }
+    const closedOthers = others.filter(o => o.status === 'closed')
+    if (closedOthers.length > 0 && keep.status !== 'closed') return { error: 'Geschlossene Flaschen lassen sich nur in einen geschlossenen Eintrag zusammenführen. Bitte einen geschlossenen Eintrag als den bleibenden wählen.' }
+    const addQty = closedOthers.reduce((sum, o) => sum + o.quantity, 0)
+    return { addQty, closedOthers, emptyOthers: others.filter(o => o.status === 'empty') }
+  }
+  async function doMerge() {
+    const list = selected()
+    const keep = list.find(b => b.id === mergeAsk.keepId)
+    const others = list.filter(b => b.id !== mergeAsk.keepId)
+    if (!keep || others.length === 0) return setMergeAsk(null)
+    const plan = mergePlan(keep, others)
+    if (plan.error) return setMsg('Fehler: ' + plan.error)
+    setMergeBusy(true)
+    const newQty = keep.quantity + plan.addQty
+    const keepName = `${keep.brand} ${keep.name}`
+    try {
+      const patch = {}
+      if (plan.addQty > 0) { patch.quantity = newQty; patch.reorder = false }
+      // Fehlende Angaben aus den anderen Einträgen übernehmen
+      const blank = v => v === null || v === undefined || v === ''
+      for (const k of ['country', 'region', 'abv', 'vintage', 'barcode', 'min_stock', 'notes', 'last_price', 'supplier_sku']) {
+        if (blank(keep[k])) { const src = others.find(o => !blank(o[k])); if (src) patch[k] = src[k] }
+      }
+      // Fotos: nur Lücken füllen, die Vorschau gehört zum Vorderfoto
+      const adopted = new Set([keep.image_front, keep.image_back, keep.image_side, keep.image_thumb].filter(Boolean))
+      if (!keep.image_front) {
+        const src = others.find(o => o.image_front)
+        if (src) { patch.image_front = src.image_front; adopted.add(src.image_front); if (src.image_thumb) { patch.image_thumb = src.image_thumb; adopted.add(src.image_thumb) } }
+      }
+      for (const k of ['image_back', 'image_side']) {
+        if (!keep[k]) { const src = others.find(o => o[k]); if (src) { patch[k] = src[k]; adopted.add(src[k]) } }
+      }
+      const ids = others.map(o => o.id)
+      let r = await supabase.from('movements').update({ bottle_id: keep.id }).in('bottle_id', ids)
+      if (r.error) throw r.error
+      if (Object.keys(patch).length > 0) {
+        r = await supabase.from('bottles').update(patch).eq('id', keep.id)
+        if (r.error) throw r.error
+      }
+      r = await supabase.from('bottles').delete().in('id', ids)
+      if (r.error) throw r.error
+      const orphans = others.flatMap(o => [o.image_front, o.image_back, o.image_side, o.image_thumb]).filter(x => x && !adopted.has(x))
+      if (orphans.length > 0) { try { await supabase.storage.from(BUCKET).remove(orphans) } catch { /* ignorieren */ } }
+      setMergeAsk(null)
+      endSelect()
+      await reload()
+      setMoved(`${others.length + 1} Einträge zu „${keepName}“ zusammengeführt${plan.addQty > 0 ? `, jetzt ${newQty}× geschlossen` : ''}.`)
+    } catch (e) {
+      setMsg('Fehler: ' + e.message)
+    }
+    setMergeBusy(false)
   }
 
   function mainOf(b) {
@@ -778,6 +874,7 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, lastIn = {}, plac
             <button type="button" onClick={() => setSel(new Set(filtered.map(b => b.id)))}>Alle {filtered.length} gefilterten</button>
             <button type="button" disabled={sel.size === 0} onClick={() => setSel(new Set())}>Keine</button>
             <button type="button" className="primary" disabled={sel.size === 0} onClick={() => setMvOpen(v => !v)}>Verschieben…</button>
+            <button type="button" className="primary" disabled={sel.size < 2} onClick={startMerge}>Zusammenführen…</button>
           </div>
           {mvOpen && sel.size > 0 && (
             <div className="sel-move">
@@ -845,6 +942,43 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, lastIn = {}, plac
               </div>
               <button className="ghost-btn" style={{ marginTop: 0 }} onClick={() => doUndoOpen(ub, null)}>Geschlossen hier lassen ({placeOf(ub)})</button>
               <button className="link-back" onClick={() => setUndoAsk(null)}>Abbrechen</button>
+            </div>
+          </div>
+        )
+      })()}
+      {mergeAsk && (() => {
+        const list = selected()
+        const keep = list.find(b => b.id === mergeAsk.keepId) || list[0]
+        const others = list.filter(b => b.id !== keep.id)
+        const plan = mergePlan(keep, others)
+        const placeOf = x => [roomById[x.room_id]?.name, locById[x.location_id]?.name].filter(Boolean).join(' › ') || 'ohne Ort'
+        const keys = new Set(list.map(productKey))
+        const farAway = plan.closedOthers ? plan.closedOthers.filter(o => placeOf(o) !== placeOf(keep)) : []
+        return (
+          <div className="ask-back" onClick={() => !mergeBusy && setMergeAsk(null)}>
+            <div className="ask-card" onClick={e => e.stopPropagation()}>
+              <h3>Einträge zusammenführen</h3>
+              <p>Welcher Eintrag soll bleiben?</p>
+              <div className="ask-reserve">
+                {list.map(x => (
+                  <label key={x.id} className="qr-row">
+                    <input type="radio" name="keep" checked={x.id === keep.id} onChange={() => setMergeAsk({ keepId: x.id })} />
+                    <span><b>{x.brand} {x.name}</b> · {STATUS[x.status]} ×{x.quantity} · {placeOf(x)}{x.image_front ? ' · mit Foto' : ''}</span>
+                  </label>
+                ))}
+              </div>
+              {plan.error
+                ? <div className="msg error">{plan.error}</div>
+                : (
+                  <div className="hint need-t">
+                    {plan.addQty > 0 ? `${plan.addQty} geschlossene ${plan.addQty === 1 ? 'Flasche kommt' : 'Flaschen kommen'} dazu (danach ${keep.quantity + plan.addQty}×). ` : ''}
+                    {others.length} {others.length === 1 ? 'anderer Eintrag entfällt' : 'andere Einträge entfallen'}. Buchungen, fehlende Angaben und Fotos werden übernommen.
+                    {farAway.length > 0 ? ` Hinweis: Flaschen von anderem Ort kommen nach ${placeOf(keep)}.` : ''}
+                    {keys.size > 1 ? ' Achtung: Name oder Größe unterscheiden sich, es bleiben die Angaben des gewählten Eintrags.' : ''}
+                  </div>
+                )}
+              <button className="save-btn" disabled={!!plan.error || mergeBusy} onClick={doMerge}>{mergeBusy ? 'Führt zusammen…' : 'Zusammenführen'}</button>
+              <button className="link-back" disabled={mergeBusy} onClick={() => setMergeAsk(null)}>Abbrechen</button>
             </div>
           </div>
         )
@@ -1017,6 +1151,8 @@ function Scanner({ onCode, onLabel, onManual, compact = false, autoStart = false
   }
 
   useEffect(() => { if (autoStart) start(); return () => stop() }, [])
+  const tabActive = useContext(TabActive)
+  useEffect(() => { if (!tabActive) stop() }, [tabActive])
 
   async function handle(code) {
     setBusy(true)
