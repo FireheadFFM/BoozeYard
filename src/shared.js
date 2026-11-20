@@ -1,5 +1,6 @@
 import { supabase } from './supabase'
 import { resizeImage, blobToBase64, productKey } from './utils'
+import { parsePlaceCode } from './qr'
 
 // Gemeinsame Hilfsfunktionen für Formular, Scanner und Foto-Schnellerfassung
 
@@ -7,7 +8,15 @@ export const sameText = (a, b) => String(a || '').trim().toLowerCase() === Strin
 
 /* ---------- Barcode lesen ---------- */
 
-export const FORMATS = ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128']
+export const FORMATS = ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'qr_code']
+
+// Aus den erkannten Codes den passenden wählen: Orts-QR der App zuerst, sonst der erste Strichcode.
+// Fremde QR-Codes (z. B. Werbe-QR auf Etiketten) werden ignoriert.
+export function pickCode(found) {
+  for (const f of found || []) if (f.rawValue && parsePlaceCode(f.rawValue)) return f.rawValue
+  const lin = (found || []).find(f => f.rawValue && f.format !== 'qr_code')
+  return lin ? lin.rawValue : null
+}
 
 export async function createDetector(preferWasm) {
   if (!preferWasm && 'BarcodeDetector' in window) {
@@ -47,7 +56,8 @@ export async function decodeFromFile(file) {
     for (const [side, rot, enh] of attempts) {
       try {
         const found = await detector.detect(make(side, rot, enh))
-        if (found.length > 0 && found[0].rawValue) { bmp.close && bmp.close(); return found[0].rawValue }
+        const code = pickCode(found)
+        if (code) { bmp.close && bmp.close(); return code }
       } catch { /* nächster Versuch */ }
     }
   }

@@ -362,3 +362,41 @@ a.shown-item { text-decoration: none; }
 /* Chat: Quellenangaben der Websuche (U19) */
 .sources { font-size: 11px; color: #8a7050; margin-top: 8px; line-height: 1.5; }
 .sources a { color: #c8a96a; margin-left: 6px; text-decoration: underline; }
+
+/* ---------- Update 21: QR-Etiketten und Orts-Ansicht ---------- */
+.place-banner { display: flex; align-items: center; justify-content: space-between; gap: 10px; background: #1a0f05; border: 1px solid #c8891a; border-radius: 8px; padding: 10px 12px; margin: 0 0 12px; font-size: 12px; color: #b09060; }
+.place-banner span { display: block; font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; }
+.place-banner b { display: block; color: #f0c96a; font-size: 15px; font-weight: 600; margin-top: 2px; }
+.place-banner small { display: block; margin-top: 3px; font-size: 11px; color: #8a7050; }
+.place-banner button { background: transparent; border: 1px solid #4a3018; color: #c8a96a; border-radius: 6px; padding: 6px 10px; font-family: inherit; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; cursor: pointer; white-space: nowrap; }
+
+.qr-panel { gap: 10px; margin-bottom: 12px; }
+.qr-quick { display: flex; gap: 8px; flex-wrap: wrap; }
+.qr-group { border-top: 1px solid #2a1c0c; padding-top: 6px; }
+.qr-row { display: flex; align-items: center; gap: 10px; padding: 7px 2px; font-size: 14px; color: #f0e6d3; cursor: pointer; }
+.qr-row input { width: 20px; height: 20px; flex: none; accent-color: #c8891a; }
+.qr-group .qr-row:not(.room) { padding-left: 26px; }
+.qr-row.room em { font-style: normal; font-size: 11px; color: #8a7050; margin-left: 6px; }
+.qr-none { padding-left: 28px; }
+.qr-preview { margin: 4px 0 16px; }
+.qr-preview .qr-sheet { zoom: 0.4; border: 1px solid #4a3018; }
+
+/* Etikettenbogen: A4 hochkant, 2 × 2 Etiketten A6 (105 × 148 mm) */
+.qr-sheet { width: 210mm; height: 296mm; display: grid; grid-template-columns: 105mm 105mm; grid-template-rows: 148mm 148mm; background: #fff; color: #000; box-sizing: border-box; break-after: page; page-break-after: always; overflow: hidden; }
+.qr-sheet:last-child { break-after: auto; page-break-after: auto; }
+.qr-label { width: 105mm; height: 148mm; box-sizing: border-box; display: flex; flex-direction: column; align-items: center; padding: 9mm 8mm 0; position: relative; font-family: 'DejaVu Sans', Arial, Helvetica, sans-serif; text-align: center; }
+.qr-label.framed { border: 0.3mm dashed #bbb; }
+.ql-brand { font-size: 11pt; font-weight: 700; letter-spacing: 0.12em; color: #555; margin-bottom: 1mm; }
+.ql-code { width: 76mm; height: 76mm; display: block; }
+.ql-name { font-weight: 700; line-height: 1.1; margin-top: 3mm; overflow-wrap: anywhere; max-width: 89mm; }
+.ql-path { font-size: 13pt; color: #333; margin-top: 3mm; max-width: 89mm; overflow-wrap: anywhere; }
+.ql-hint { position: absolute; bottom: 9mm; left: 0; right: 0; font-size: 8pt; color: #777; }
+
+.qr-print-root { display: none; }
+@page { size: A4 portrait; margin: 0; }
+@media print {
+  body.qr-printing { background: #fff !important; margin: 0 !important; }
+  body.qr-printing > #root { display: none !important; }
+  body.qr-printing .qr-print-root { display: block; }
+  .qr-print-root .qr-sheet { zoom: 1; border: 0; }
+}

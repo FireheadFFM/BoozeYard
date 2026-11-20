@@ -5,7 +5,8 @@ import {
   digitsOnly, codeVariants, codeWarning, lookupBarcode,
   productKey, stockGroups,
 } from './utils'
-import { createDetector, decodeFromFile, runAnalyze, ensureLookup, aiToPrefill, ensureRoom, ensureLocation, clearReorderFor, resizeCached, warmImage } from './shared'
+import { parsePlaceCode } from './qr'
+import { createDetector, pickCode, decodeFromFile, runAnalyze, ensureLookup, aiToPrefill, ensureRoom, ensureLocation, clearReorderFor, resizeCached, warmImage } from './shared'
 import Schnell from './Schnell'
 import Chat from './Chat'
 import Einkauf from './Einkauf'
@@ -185,6 +186,9 @@ function Main({ userId, onLogout }) {
   const [adminKey, setAdminKey] = useState(0)
   const [dup, setDup] = useState(null)       // { data, id } – gescannte Flasche ist schon geschlossen im Bestand
   const [dupMsg, setDupMsg] = useState('')
+  const [pendingPlace, setPendingPlace] = useState(() => parsePlaceCode(window.location.search ? window.location.href : ''))   // Orts-Link aus dem QR-Code
+  const [placeReq, setPlaceReq] = useState({ key: 0, roomId: '', locId: '' })   // Orts-Ansicht in der Bestandsliste
+  const [notice, setNotice] = useState('')
 
   async function loadThumbs(rows) {
     const paths = rows.map(b => b.image_thumb).filter(Boolean)
@@ -235,8 +239,39 @@ function Main({ userId, onLogout }) {
 
   useEffect(() => { loadAll() }, [])
 
+  // Orts-QR (Link oder Scan): Bestandsliste auf diesen Ort filtern
+  function openPlace(p) {
+    let roomId = ''
+    let locId = ''
+    if (p.kind === 'location') {
+      const l = locations.find(x => x.id === p.id)
+      if (l) { roomId = l.room_id; locId = l.id }
+    } else {
+      const r = rooms.find(x => x.id === p.id)
+      if (r) roomId = r.id
+    }
+    if (!roomId) {
+      setNotice('Zu diesem QR-Code gibt es keinen Ort mehr. Das Etikett ist veraltet, der Ort wurde gelöscht.')
+      setTab('bottles'); setEditId(null); setCapView(null); setDup(null)
+      return
+    }
+    setNotice('')
+    setTab('bottles'); setEditId(null); setCapView(null); setDup(null)
+    setPlaceReq(r => ({ key: r.key + 1, roomId, locId }))
+  }
+
+  // Link aus dem QR-Code beim Start: nach dem Laden der Daten den Ort öffnen
+  useEffect(() => {
+    if (loading || !pendingPlace) return
+    openPlace(pendingPlace)
+    setPendingPlace(null)
+    try { window.history.replaceState(null, '', window.location.pathname) } catch { /* ignorieren */ }
+  }, [loading, pendingPlace])
+
   // Barcode erkannt (Scanner-Tab): Daten suchen, dann Formular vorbefüllen
   async function handleCode(raw) {
+    const place = parsePlaceCode(raw)
+    if (place) { openPlace(place); return }
     const data = await resolveCode(raw, bottles, cats)
     if (!data) return
     setDupMsg('')
@@ -307,15 +342,16 @@ function Main({ userId, onLogout }) {
     <Shell onLogout={onLogout}>
       <nav>
         {tabs.map(([id, label]) => (
-          <button key={id} onClick={() => { setTab(id); setEditId(null); setCapView(null); setDup(null); setDupMsg(''); if (id === 'admin') setAdminKey(k => k + 1); if (id === 'bottles' || id === 'admin') setSeries({ roomId: '', locId: '' }) }} className={tab === id ? 'active' : ''}>{label}</button>
+          <button key={id} onClick={() => { setTab(id); setEditId(null); setCapView(null); setDup(null); setDupMsg(''); setNotice(''); setPlaceReq(r => ({ key: 0, roomId: '', locId: '' })); if (id === 'admin') setAdminKey(k => k + 1); if (id === 'bottles' || id === 'admin') setSeries({ roomId: '', locId: '' }) }} className={tab === id ? 'active' : ''}>{label}</button>
         ))}
       </nav>
       <main>
         {error && <div className="msg error">{error}</div>}
+        {notice && <div className="msg error">{notice}</div>}
         {loading && <div className="empty">Lädt…</div>}
         {!loading && tab === 'bottles' && !editing && (
           <BottleList bottles={bottles} cats={cats} rooms={rooms} locations={locations} thumbs={thumbs} lastIn={lastIn}
-            reload={loadAll} onEdit={id => setEditId(id)} />
+            placeReq={placeReq} reload={loadAll} onEdit={id => setEditId(id)} />
         )}
         {!loading && tab === 'bottles' && editing && (
           <BottleForm key={editing.id} userId={userId} bottle={editing} cats={cats} rooms={rooms}
@@ -453,7 +489,7 @@ function BottleInfo({ b, thumb, place, cat, group, lastIn, onClose, onEdit, onGa
 
 /* ---------- Bestandsliste mit Suche und Filtern ---------- */
 
-function BottleList({ bottles, cats, rooms, locations, thumbs, lastIn = {}, reload, onEdit }) {
+function BottleList({ bottles, cats, rooms, locations, thumbs, lastIn = {}, placeReq, reload, onEdit }) {
   const [q, setQ] = useState('')
   const [catId, setCatId] = useState('')
   const [status, setStatus] = useState('')
@@ -475,7 +511,12 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, lastIn = {}, relo
   const [emptyAsk, setEmptyAsk] = useState(null)
   const [openAsk, setOpenAsk] = useState(null)     // { b, roomId, locId }: Ziel der geöffneten Flasche wählen
   const [undoAsk, setUndoAsk] = useState(null)     // { b, cands }: zu welchem Stapel zurück
+  const [placeMode, setPlaceMode] = useState(false) // Orts-Ansicht (aus QR-Code): leere Flaschen ausgeblendet
   useEffect(() => { setLimit(60) }, [q, catId, status, roomId, locId, sortBy])
+  useEffect(() => {
+    if (!placeReq || !placeReq.key) return
+    setQ(''); setCatId(''); setStatus(''); setRoomId(placeReq.roomId); setLocId(placeReq.locId); setPlaceMode(true)
+  }, [placeReq?.key])
 
   const catById = useMemo(() => Object.fromEntries(cats.map(c => [c.id, c])), [cats])
   const roomById = useMemo(() => Object.fromEntries(rooms.map(r => [r.id, r])), [rooms])
@@ -518,6 +559,7 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, lastIn = {}, relo
       const main = mainOf(b)
       if (catId && main?.id !== catId) return false
       if (status && b.status !== status) return false
+      if (placeMode && !status && b.status === 'empty') return false
       if (roomId && b.room_id !== roomId) return false
       if (locId && b.location_id !== locId) return false
       if (terms.length) {
@@ -531,7 +573,7 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, lastIn = {}, relo
     // Zuletzt erfasst: neueste Zugangsbuchung zuerst, Flaschen ohne Buchung ans Ende (stabil nach Name)
     if (sortBy === 'recent') list.sort((x, y) => (lastIn[y.id] || '').localeCompare(lastIn[x.id] || ''))
     return list
-  }, [bottles, q, catId, status, roomId, locId, catById, roomById, locById, sortBy, lastIn])
+  }, [bottles, q, catId, status, roomId, locId, catById, roomById, locById, sortBy, lastIn, placeMode])
 
   const total = filtered.reduce((s, b) => s + (b.status === 'empty' ? 0 : b.quantity), 0)
   const roomLocs = locations.filter(l => l.room_id === roomId)
@@ -677,8 +719,21 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, lastIn = {}, relo
     reload()
   }
 
+  const placeName = [roomById[roomId]?.name, locId ? locById[locId]?.name : null].filter(Boolean).join(' › ')
+  function clearPlace() { setPlaceMode(false); setRoomId(''); setLocId('') }
+
   return (
     <>
+      {placeMode && roomId && (
+        <div className="place-banner">
+          <div>
+            <span>Inhalt von</span>
+            <b>{placeName}</b>
+            <small>Leere Flaschen sind ausgeblendet.</small>
+          </div>
+          <button type="button" onClick={clearPlace}>Alle anzeigen</button>
+        </div>
+      )}
       <div className="filters">
         <input className="search" type="search" placeholder="Suchen: Marke, Name, Herkunft, Notiz…" value={q} onChange={e => setQ(e.target.value)} />
         <div className="filter-row">
@@ -965,7 +1020,7 @@ function Scanner({ onCode, onLabel, onManual, compact = false, autoStart = false
 
   async function handle(code) {
     setBusy(true)
-    setInfo(`Code ${code} erkannt – suche Produktdaten…`)
+    setInfo(parsePlaceCode(code) ? 'Orts-Code erkannt…' : `Code ${code} erkannt – suche Produktdaten…`)
     await onCode(code)
     setInfo('')
     setBusy(false)
@@ -1067,8 +1122,8 @@ function Scanner({ onCode, onLabel, onManual, compact = false, autoStart = false
         try {
           const found = await detector.detect(v)
           errors = 0
-          if (found.length > 0) {
-            const code = found[0].rawValue
+          const code = pickCode(found)
+          if (code) {
             stop()
             handle(code)
             return
@@ -1647,6 +1702,7 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
   // Barcode im Formular: Treffer füllen nur leere Felder
   async function onScanCode(raw) {
     setScanOpen(false)
+    if (parsePlaceCode(raw)) { setError(''); setMsg('Das ist ein Orts-QR-Code, kein Flaschen-Barcode. Den Ort wählst du weiter unten aus.'); return }
     const data = await resolveCode(raw, bottles, cats)
     if (!data) return
     const patch = initialForm(null, data, cats)
