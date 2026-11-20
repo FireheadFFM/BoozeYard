@@ -3,7 +3,7 @@
 export const SIZES = [20, 30, 50, 100, 200, 350, 500, 700, 750, 1000, 1500, 1750]
 export const STATUS = { closed: 'Geschlossen', open: 'Offen', empty: 'Leer' }
 export const BUCKET = 'bottle-images'
-export const APP_VERSION = 'U22'
+export const APP_VERSION = 'U23'
 
 /* ---------- Bestand je Produkt (Mindestbestand) ---------- */
 
@@ -209,4 +209,15 @@ export function blobToBase64(blob) {
     r.onerror = () => reject(new Error('Bild konnte nicht gelesen werden'))
     r.readAsDataURL(blob)
   })
+}
+
+// Bildpfade, die von anderen Einträgen (außer den genannten) noch genutzt werden
+export function pathsInUse(bottles, exceptIds) {
+  const skip = new Set(exceptIds)
+  const used = new Set()
+  for (const x of bottles) {
+    if (skip.has(x.id)) continue
+    for (const p of [x.image_front, x.image_back, x.image_side, x.image_thumb]) if (p) used.add(p)
+  }
+  return used
 }

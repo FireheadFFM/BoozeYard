@@ -3,7 +3,7 @@ import { supabase } from './supabase'
 import {
   SIZES, STATUS, BUCKET, APP_VERSION, fetchAll, lsGet, lsSet, abvLabel,
   digitsOnly, codeVariants, codeWarning, lookupBarcode,
-  productKey, stockGroups,
+  productKey, stockGroups, pathsInUse,
 } from './utils'
 import { parsePlaceCode } from './qr'
 import { createDetector, pickCode, decodeFromFile, runAnalyze, ensureLookup, aiToPrefill, ensureRoom, ensureLocation, clearReorderFor, resizeCached, warmImage } from './shared'
@@ -630,7 +630,8 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, lastIn = {}, plac
       }
       r = await supabase.from('bottles').delete().in('id', ids)
       if (r.error) throw r.error
-      const orphans = others.flatMap(o => [o.image_front, o.image_back, o.image_side, o.image_thumb]).filter(x => x && !adopted.has(x))
+      const usedByOthers = pathsInUse(bottles, ids)
+      const orphans = others.flatMap(o => [o.image_front, o.image_back, o.image_side, o.image_thumb]).filter(x => x && !adopted.has(x) && !usedByOthers.has(x))
       if (orphans.length > 0) { try { await supabase.storage.from(BUCKET).remove(orphans) } catch { /* ignorieren */ } }
       setMergeAsk(null)
       endSelect()
@@ -706,7 +707,7 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, lastIn = {}, plac
     if (b.quantity > 1) {
       const { error: e1 } = await supabase.from('bottles').update({ quantity: b.quantity - 1 }).eq('id', b.id)
       if (e1) return fail(e1)
-      const { id, created_at, updated_at, user_id, captured_at, image_front, image_back, image_side, image_thumb, ...copy } = b
+      const { id, created_at, updated_at, user_id, captured_at, ...copy } = b // Fotopfade werden mitkopiert (gleiche Dateien)
       const { error: e2 } = await supabase.from('bottles').insert({ ...copy, ...where, status: 'open', quantity: 1, fill_percent: 100 })
       if (e2) return fail(e2)
     } else {
@@ -758,11 +759,13 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, lastIn = {}, plac
   async function markEmpty(b, reorder) {
     setMsg('')
     setEmptyAsk(null)
-    const upd = { status: 'empty', fill_percent: 0 }
+    // Leere Flasche kommt in den Müll: Ort leeren, alten Ort in der Buchung merken (für „Zurück“)
+    const oldRoom = b.room_id, oldLoc = b.location_id
+    const upd = { status: 'empty', fill_percent: 0, room_id: null, location_id: null }
     if (reorder) upd.reorder = true
     const { error } = await supabase.from('bottles').update(upd).eq('id', b.id)
     if (error) return fail(error)
-    await supabase.from('movements').insert({ bottle_id: b.id, type: 'empty', quantity: -1 })
+    await supabase.from('movements').insert({ bottle_id: b.id, type: 'empty', quantity: -1, ...(oldRoom ? { notes: `Ort:${oldRoom}|${oldLoc || ''}` } : {}) })
     if (reorder) setMsg('Als leer markiert und auf die Einkaufsliste gesetzt.')
     reload()
   }
@@ -770,7 +773,17 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, lastIn = {}, plac
   // Leer rückgängig: Flasche war fast leer, daher zurück auf "offen" mit 10 %
   async function undoEmpty(b) {
     setMsg('')
-    const { error } = await supabase.from('bottles').update({ status: 'open', fill_percent: 10, reorder: false }).eq('id', b.id)
+    const upd = { status: 'open', fill_percent: 10, reorder: false }
+    // alten Ort aus der letzten Leer-Buchung wiederherstellen (falls es ihn noch gibt)
+    if (!b.room_id) {
+      const { data: mv } = await supabase.from('movements').select('notes').eq('bottle_id', b.id).eq('type', 'empty').order('moved_at', { ascending: false }).limit(1)
+      const m = /^Ort:([0-9a-f-]+)\|([0-9a-f-]*)$/i.exec(mv?.[0]?.notes || '')
+      if (m && rooms.some(r => r.id === m[1])) {
+        upd.room_id = m[1]
+        upd.location_id = m[2] && locations.some(l => l.id === m[2] && l.room_id === m[1]) ? m[2] : null
+      }
+    }
+    const { error } = await supabase.from('bottles').update(upd).eq('id', b.id)
     if (error) return fail(error)
     await supabase.from('movements').insert({ bottle_id: b.id, type: 'adjustment', quantity: 1, notes: 'Leer rückgängig' })
     reload()
@@ -791,7 +804,8 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, lastIn = {}, plac
   // Ganzen Eintrag löschen (mit Bildern)
   async function deleteEntry(b) {
     setMsg('')
-    const paths = [b.image_front, b.image_back, b.image_side, b.image_thumb].filter(Boolean)
+    const used = pathsInUse(bottles, [b.id])
+    const paths = [b.image_front, b.image_back, b.image_side, b.image_thumb].filter(x => x && !used.has(x))
     if (paths.length > 0) await supabase.storage.from(BUCKET).remove(paths)
     const { error } = await supabase.from('bottles').delete().eq('id', b.id)
     if (error) return fail(error)
@@ -1591,7 +1605,11 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
       const { error } = await supabase.from('bottles').update(update).eq('id', bottleId)
       if (error) throw error
     }
-    if (toDelete.length > 0) await supabase.storage.from(BUCKET).remove(toDelete)
+    if (toDelete.length > 0) {
+      const used = pathsInUse(bottles, [bottleId])
+      const del = toDelete.filter(x => !used.has(x))
+      if (del.length > 0) await supabase.storage.from(BUCKET).remove(del)
+    }
   }
 
   // Foto-Auswertung mit Claude (über die Supabase-Funktion analyze-label)
@@ -1811,7 +1829,8 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
     setBusy(true)
     setError('')
     try {
-      const paths = [bottle.image_front, bottle.image_back, bottle.image_side, bottle.image_thumb].filter(Boolean)
+      const used = pathsInUse(bottles, [bottle.id])
+      const paths = [bottle.image_front, bottle.image_back, bottle.image_side, bottle.image_thumb].filter(x => x && !used.has(x))
       if (paths.length > 0) await supabase.storage.from(BUCKET).remove(paths)
       const { error: e1 } = await supabase.from('bottles').delete().eq('id', bottle.id)
       if (e1) throw e1
