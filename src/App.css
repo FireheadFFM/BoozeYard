@@ -481,3 +481,10 @@ a.shown-item { text-decoration: none; }
 .jr-table .c-rate { width: 40mm; }
 .jr-table .st, .jr-table .sp { color: #b07a10; }
 .jr-table .avg { color: #666; font-size: 8.5pt; }
+
+/* Update 24: Anzahl bei der Schnellerfassung */
+.q-qty { display: flex; align-items: center; gap: 12px; margin: 10px 0 4px; color: #c9b38a; font-size: 14px; }
+.q-qty span { flex: 1; }
+.q-qty button { width: 44px; height: 44px; border-radius: 10px; border: 1px solid #5a4528; background: #1d140b; color: #f0c96a; font-size: 22px; line-height: 1; }
+.q-qty button:disabled { opacity: .35; }
+.q-qty b { min-width: 28px; text-align: center; font-size: 20px; color: #f0e6d3; }

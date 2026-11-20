@@ -97,7 +97,7 @@ function cardFromItem(it, preset) {
     country, region,
     notes: ai.noteText || '',
     barcode: it.barcode || '',
-    qty: '1',
+    qty: preset.status === 'open' ? '1' : String(it.qty || 1),
     bstatus: preset.status,
     fill: preset.fill,
     include: true,
@@ -125,12 +125,14 @@ export default function Schnell({ userId, bottles, cats, rooms, locations, looku
   const [items, setItems] = useState([])
   const [draft, setDraft] = useState({})            // { front, back, side } als Dateien
   const [draftUrls, setDraftUrls] = useState({})
+  const [draftQty, setDraftQty] = useState(1)
   const [saved, setSaved] = useState(null)          // gefundener Zwischenstand
   const [cards, setCards] = useState([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [result, setResult] = useState(null)
   const startedRef = useRef(new Set())
+  const prepRef = useRef(new Set())
   const inputs = useRef({})
 
   const roomLocs = locations.filter(l => l.room_id === preset.roomId)
@@ -195,11 +197,38 @@ export default function Schnell({ userId, bottles, cats, rooms, locations, looku
     }
   }, [items])
 
+  // Fotos im Hintergrund verkleinern (damit man sofort die nächste Flasche aufnehmen kann)
+  useEffect(() => {
+    for (const it of items) {
+      if (it.state === 'preparing' && !prepRef.current.has(it.id)) {
+        prepRef.current.add(it.id)
+        prepareItem(it)
+      }
+    }
+  }, [items])
+
+  async function prepareItem(it) {
+    try {
+      const entries = await Promise.all(SLOT_LIST.filter(([slot]) => it.files?.[slot]).map(async ([slot]) => [slot, await resizeImage(it.files[slot], 1800, 0.85)]))
+      setItems(list => list.map(x => (x.id === it.id ? { ...x, blobs: Object.fromEntries(entries), files: null, state: 'queued' } : x)))
+    } catch (e) {
+      setItems(list => list.map(x => (x.id === it.id ? { ...x, state: 'error', err: 'Foto konnte nicht verarbeitet werden: ' + (e.message || e) } : x)))
+    }
+  }
+
+  // Zwischenstand sichern, sobald ein Foto-Paar fertig verkleinert ist
+  const persistKey = items.filter(i => i.blobs).map(i => i.id).join(',')
+  useEffect(() => {
+    if (persistKey) persist(items)
+  }, [persistKey])
+
   // Beim Warten: sobald alles ausgewertet ist, weiter zur Prüfung
   useEffect(() => {
     if (stage !== 'wait') return
-    if (items.some(i => i.state === 'queued' || i.state === 'working')) return
-    setCards(buildCards(items))
+    if (items.some(i => i.state === 'preparing' || i.state === 'queued' || i.state === 'working')) return
+    const usable = items.filter(i => i.blobs)
+    if (usable.length < items.length) setError(`${items.length - usable.length} Flasche${items.length - usable.length === 1 ? '' : 'n'} konnten nicht verarbeitet werden und fehlen in der Liste.`)
+    setCards(buildCards(usable))
     setStage('review')
   }, [stage, items])
 
@@ -209,7 +238,7 @@ export default function Schnell({ userId, bottles, cats, rooms, locations, looku
       const c = cardFromItem(it, preset)
       const key = it.barcode || (c.brand && c.name ? `n:${normKey(c.brand + c.name)}:${c.size}` : '')
       const g = key ? groups.find(x => x.key === key) : null
-      if (g) { g.card.members.push(it); g.card.qty = String(g.card.members.length) } else groups.push({ key, card: c })
+      if (g) { g.card.members.push(it); g.card.qty = String(g.card.members.reduce((n, m) => n + (preset.status === 'open' ? 1 : (m.qty || 1)), 0)) } else groups.push({ key, card: c })
     }
     const locId = preset.locId === '__new' ? '' : preset.locId
     return groups.map(({ card }) => {
@@ -237,7 +266,7 @@ export default function Schnell({ userId, bottles, cats, rooms, locations, looku
     if (!saved) return
     if (saved.preset) setPreset(p => ({ ...p, ...saved.preset }))
     setItems(saved.items.map(s => ({
-      id: s.id, blobs: s.blobs,
+      id: s.id, blobs: s.blobs, qty: s.qty || 1,
       urls: Object.fromEntries(Object.entries(s.blobs).map(([k, b]) => [k, URL.createObjectURL(b)])),
       state: 'queued', err: '', barcode: '', ai: null,
     })))
@@ -262,44 +291,36 @@ export default function Schnell({ userId, bottles, cats, rooms, locations, looku
     Object.values(draftUrls).forEach(u => URL.revokeObjectURL(u))
     setDraft({})
     setDraftUrls({})
+    setDraftQty(1)
   }
 
   const draftReady = !!(draft.front && draft.back)
   const draftAny = !!(draft.front || draft.back || draft.side)
 
   async function persist(list, p = preset) {
-    await idbPut(storeKey, { preset: p, items: list.map(i => ({ id: i.id, blobs: i.blobs })) })
+    await idbPut(storeKey, { preset: p, items: list.filter(i => i.blobs).map(i => ({ id: i.id, blobs: i.blobs, qty: i.qty || 1 })) })
   }
 
-  async function commitDraft() {
-    setBusy(true)
+  // Speichert sofort (ohne Wartezeit); Verkleinern, Auswertung und Zwischenspeichern laufen im Hintergrund
+  function commitDraft() {
     setError('')
-    try {
-      const blobs = {}
-      for (const [slot] of SLOT_LIST) if (draft[slot]) blobs[slot] = await resizeImage(draft[slot], 1800, 0.85)
-      const it = {
-        id: newId(), blobs,
-        urls: Object.fromEntries(Object.entries(blobs).map(([k, b]) => [k, URL.createObjectURL(b)])),
-        state: 'queued', err: '', barcode: '', ai: null,
-      }
-      const next = [...items, it]
-      setItems(next)
-      clearDraft()
-      persist(next)
-      return next
-    } catch (e) {
-      setError('Foto konnte nicht verarbeitet werden: ' + e.message)
-      return null
-    } finally {
-      setBusy(false)
+    const it = {
+      id: newId(), files: { ...draft }, blobs: null,
+      urls: { ...draftUrls },                 // Vorschau-Adressen werden weiterverwendet
+      state: 'preparing', err: '', barcode: '', ai: null,
+      qty: preset.status === 'open' ? 1 : draftQty,
     }
+    setItems(list => [...list, it])
+    setDraft({})
+    setDraftUrls({})
+    setDraftQty(1)
+    return true
   }
 
   async function finishCapture() {
     if (draftAny) {
       if (!draftReady) return
-      const next = await commitDraft()
-      if (!next) return
+      commitDraft()
     }
     setStage('wait')
   }
@@ -311,6 +332,8 @@ export default function Schnell({ userId, bottles, cats, rooms, locations, looku
   }
 
   function retry(id) {
+    const it = items.find(x => x.id === id)
+    if (it && !it.blobs) { prepRef.current.delete(id); patch(id, { state: 'preparing', err: '' }); return }
     startedRef.current.delete(id)
     patch(id, { state: 'queued', err: '' })
   }
@@ -320,7 +343,7 @@ export default function Schnell({ userId, bottles, cats, rooms, locations, looku
   const setCard = (cid, p) => setCards(list => list.map(c => (c.cid === cid ? { ...c, ...p } : c)))
 
   function split(cid) {
-    setCards(list => list.flatMap(c => (c.cid !== cid ? [c] : c.members.map(m => ({ ...c, cid: newId(), members: [m], qty: '1', mode: 'new' })))))
+    setCards(list => list.flatMap(c => (c.cid !== cid ? [c] : c.members.map(m => ({ ...c, cid: newId(), members: [m], qty: preset.status === 'open' ? '1' : String(m.qty || 1), mode: 'new' })))))
   }
 
   const includedCards = cards.filter(c => c.include)
@@ -466,6 +489,7 @@ export default function Schnell({ userId, bottles, cats, rooms, locations, looku
     items.forEach(i => Object.values(i.urls || {}).forEach(u => URL.revokeObjectURL(u)))
     clearDraft()
     startedRef.current = new Set()
+    prepRef.current = new Set()
     setItems([])
     setCards([])
     setError('')
@@ -474,6 +498,7 @@ export default function Schnell({ userId, bottles, cats, rooms, locations, looku
 
   function again() {
     startedRef.current = new Set()
+    prepRef.current = new Set()
     setItems([])
     setCards([])
     setResult(null)
@@ -624,7 +649,15 @@ export default function Schnell({ userId, bottles, cats, rooms, locations, looku
         </div>
 
         {error && <div className="msg error">{error}</div>}
-        <button className="save-btn" onClick={commitDraft} disabled={!draftReady || busy}>{busy ? 'Speichert…' : 'Speichern & nächste Flasche'}</button>
+        {preset.status === 'closed' && (
+          <div className="q-qty">
+            <span>Anzahl dieser Flasche</span>
+            <button type="button" aria-label="Anzahl verringern" onClick={() => setDraftQty(n => Math.max(1, n - 1))} disabled={draftQty <= 1}>−</button>
+            <b>{draftQty}</b>
+            <button type="button" aria-label="Anzahl erhöhen" onClick={() => setDraftQty(n => Math.min(99, n + 1))}>+</button>
+          </div>
+        )}
+        <button className="save-btn" onClick={commitDraft} disabled={!draftReady || busy}>Speichern & nächste Flasche</button>
         <button className="ai-btn" onClick={finishCapture} disabled={busy || (draftAny && !draftReady) || (!draftAny && items.length === 0)}>
           {draftReady ? 'Diese Flasche speichern & fertig' : `Fertig – ${items.length} Flasche${items.length === 1 ? '' : 'n'} prüfen`}
         </button>
@@ -638,7 +671,7 @@ export default function Schnell({ userId, bottles, cats, rooms, locations, looku
               <div key={it.id} className="file-item">
                 <img src={it.urls.front} alt="" />
                 <span>
-                  Flasche {i + 1}: {it.state === 'done' ? (it.ai?.brand || it.ai?.name ? `${it.ai.brand || ''} ${it.ai.name || ''}`.trim() : 'erkannt') : it.state === 'error' ? 'Fehler' : it.state === 'working' ? 'wird gelesen…' : 'wartet…'}
+                  Flasche {i + 1}{(it.qty || 1) > 1 ? ` (×${it.qty})` : ''}: {it.state === 'done' ? (it.ai?.brand || it.ai?.name ? `${it.ai.brand || ''} ${it.ai.name || ''}`.trim() : 'erkannt') : it.state === 'error' ? (it.err || 'Fehler') : it.state === 'preparing' ? 'wird vorbereitet…' : it.state === 'working' ? 'wird gelesen…' : 'wartet…'}
                 </span>
                 {it.state === 'error' && <button className="link-danger" onClick={() => retry(it.id)}>Nochmal</button>}
                 <button className="link-danger" onClick={() => removeItem(it.id)}>Entfernen</button>
