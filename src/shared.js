@@ -97,7 +97,9 @@ export async function ensureLookup(lookups, kind, name, country) {
   const existing = lookups.find(l => l.kind === kind && l.name.toLowerCase() === name.toLowerCase() &&
     (kind === 'country' || !l.country || l.country === country))
   if (existing) return existing.name
-  const { error } = await supabase.from('lookup_values').insert({ kind, name, country: kind === 'region' ? (country || null) : null })
+  const { data: sess } = await supabase.auth.getSession()
+  const uid = sess?.session?.user?.id
+  const { error } = await supabase.from('lookup_values').insert({ ...(uid ? { user_id: uid } : {}), kind, name, country: kind === 'region' ? (country || null) : null })
   if (error) throw error
   return name
 }

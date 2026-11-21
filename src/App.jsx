@@ -1538,7 +1538,7 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
 
   const countries = useMemo(() => {
     const names = lookups.filter(l => l.kind === 'country').map(l => l.name)
-    if (f.country && !names.includes(f.country)) names.push(f.country)
+    if (f.country && f.country !== '__new' && !names.includes(f.country)) names.push(f.country)
     return [...new Set(names)].sort((a, b) => a.localeCompare(b, 'de'))
   }, [lookups, f.country])
 
@@ -1546,7 +1546,7 @@ function BottleForm({ userId, bottle, prefill, cats, rooms, locations, lookups, 
     const names = lookups
       .filter(l => l.kind === 'region' && (!f.country || !l.country || l.country === f.country))
       .map(l => l.name)
-    if (f.region && !names.includes(f.region)) names.push(f.region)
+    if (f.region && f.region !== '__new' && !names.includes(f.region)) names.push(f.region)
     return [...new Set(names)].sort((a, b) => a.localeCompare(b, 'de'))
   }, [lookups, f.country, f.region])
 
