@@ -488,3 +488,17 @@ a.shown-item { text-decoration: none; }
 .q-qty button { width: 44px; height: 44px; border-radius: 10px; border: 1px solid #5a4528; background: #1d140b; color: #f0c96a; font-size: 22px; line-height: 1; }
 .q-qty button:disabled { opacity: .35; }
 .q-qty b { min-width: 28px; text-align: center; font-size: 20px; color: #f0e6d3; }
+
+/* Update 26: Symbolknöpfe in den Bestandskarten */
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.card-acts { flex: none; display: grid; grid-template-columns: 40px; gap: 6px; align-content: start; }
+.card-acts.two { grid-template-columns: repeat(2, 40px); }
+.card-acts button { position: relative; width: 40px; height: 40px; padding: 0; border-radius: 10px; border: 1px solid #4a3018; background: transparent; color: #c8a96a; display: flex; align-items: center; justify-content: center; cursor: pointer; }
+.card-acts button:hover { background: #3a2810; color: #f0c96a; }
+.card-acts button.main { border-color: #c8891a; color: #f0c96a; }
+.card-acts button.main:hover { background: #c8891a; color: #0f0a06; }
+.card-acts button.del { border-color: #7a3020; color: #e8806f; }
+.card-acts button.del:hover { background: #7a3020; color: #fff; }
+@media (min-width: 560px) {
+  .card-acts:not(.two) { grid-template-columns: repeat(3, 40px); }
+}

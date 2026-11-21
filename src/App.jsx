@@ -42,11 +42,37 @@ const BottleIcon = () => (
   </svg>
 )
 
+// Symbole der Karten-Knöpfe (Flaschenform nach Tabler Icons, MIT-Lizenz)
+const BOTTLE_BODY = 'M14 3.5c0 1.626 .507 3.212 1.45 4.537l.05 .07a8.093 8.093 0 0 1 1.5 4.694v6.199a2 2 0 0 1 -2 2h-6a2 2 0 0 1 -2 -2v-6.2c0 -1.682 .524 -3.322 1.5 -4.693l.05 -.07a7.823 7.823 0 0 0 1.45 -4.537'
+const BOTTLE_WAVE = 'M7 14.803a2.4 2.4 0 0 0 1 -.803a2.4 2.4 0 0 1 2 -1a2.4 2.4 0 0 1 2 1a2.4 2.4 0 0 0 2 1a2.4 2.4 0 0 0 2 -1a2.4 2.4 0 0 1 1 -.805'
+const BOTTLE_CAP = 'M10 5h4v-2a1 1 0 0 0 -1 -1h-2a1 1 0 0 0 -1 1v2'
+const Ico = ({ children }) => (
+  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{children}</svg>
+)
+// Öffnen: Flasche, aus der der Korken springt
+const OpenIcon = () => (
+  <Ico>
+    <g transform="translate(10 14.8) rotate(32) scale(.68) translate(-12 -12)">
+      <path d={BOTTLE_BODY} /><path d={BOTTLE_WAVE} />
+      <g transform="translate(0 -5.5)"><path d={BOTTLE_CAP} /></g>
+    </g>
+    <path d="M15.8 2.4l.6-1.4M18.6 3.4l1.4-1M20.2 6.2l1.6-.2" />
+  </Ico>
+)
+// Leer: Flasche kopfüber, ein letzter Tropfen
+const EmptyIcon = () => (
+  <Ico>
+    <g transform="translate(12 9) rotate(180) scale(.78) translate(-12 -12)"><path d={BOTTLE_BODY} /></g>
+    <path d="M12 18.4c-1 1.3-1.4 1.8-1.4 2.4a1.4 1.4 0 0 0 2.8 0c0-.6-.4-1.1-1.4-2.4z" />
+  </Ico>
+)
+const BackIcon = () => (<Ico><path d="M9 14L4 9l5-5" /><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11" /></Ico>)
+const EditIcon = () => (<Ico><path d="M4 20h4L18.5 9.5a2.1 2.1 0 0 0-3-3L5 17z" /><path d="M13.5 6.5l3 3" /></Ico>)
 const TrashIcon = () => (
-  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+  <Ico>
     <path d="M4 7h16" /><path d="M10 11v6" /><path d="M14 11v6" />
     <path d="M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12" /><path d="M9 7V4h6v3" />
-  </svg>
+  </Ico>
 )
 
 // Großansicht: Bilder im Vollbild, bei mehreren seitlich wischen, Tippen schließt
@@ -1094,13 +1120,13 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, lastIn = {}, plac
               </div>
             </div>
             {delId !== b.id && !selMode && (
-              <div className="actions full">
-                {b.status === 'closed' && <button onClick={() => askOpen(b)}>Öffnen</button>}
-                {b.status === 'open' && <button onClick={() => askEmpty(b)}>Leer</button>}
-                {b.status === 'open' && <button className="ghost" onClick={() => undoOpen(b)}>Zurück</button>}
-                {b.status === 'empty' && <button className="ghost" onClick={() => undoEmpty(b)}>Zurück</button>}
-                <button className="ghost" onClick={() => onEdit(b.id)}>Bearbeiten</button>
-                <button className="ghost del icon" aria-label="Löschen" title="Löschen" onClick={() => setDelId(b.id)}><TrashIcon /></button>
+              <div className={'card-acts' + (b.status === 'open' ? ' two' : '')}>
+                {b.status === 'closed' && <button className="main" title="Öffnen" onClick={() => askOpen(b)}><OpenIcon /><span className="sr-only">Öffnen</span></button>}
+                {b.status === 'open' && <button className="main" title="Leer" onClick={() => askEmpty(b)}><EmptyIcon /><span className="sr-only">Leer</span></button>}
+                {b.status === 'open' && <button title="Zurück (Öffnen rückgängig)" onClick={() => undoOpen(b)}><BackIcon /><span className="sr-only">Zurück</span></button>}
+                {b.status === 'empty' && <button className="main" title="Zurück (Leer rückgängig)" onClick={() => undoEmpty(b)}><BackIcon /><span className="sr-only">Zurück</span></button>}
+                <button title="Bearbeiten" onClick={() => onEdit(b.id)}><EditIcon /><span className="sr-only">Bearbeiten</span></button>
+                <button className="del" title="Löschen" onClick={() => setDelId(b.id)}><TrashIcon /><span className="sr-only">Löschen</span></button>
               </div>
             )}
             {delId === b.id && (
