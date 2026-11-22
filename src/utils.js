@@ -3,7 +3,7 @@
 export const SIZES = [20, 30, 50, 100, 200, 350, 500, 700, 750, 1000, 1500, 1750]
 export const STATUS = { closed: 'Geschlossen', open: 'Offen', empty: 'Leer' }
 export const BUCKET = 'bottle-images'
-export const APP_VERSION = 'U26'
+export const APP_VERSION = 'U27'
 
 /* ---------- Bestand je Produkt (Mindestbestand) ---------- */
 

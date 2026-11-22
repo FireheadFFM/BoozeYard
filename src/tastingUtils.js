@@ -14,11 +14,22 @@ export function fmtDate(iso) {
   return m ? `${m[3]}.${m[2]}.${m[1]}` : ''
 }
 
-export const starsText = n => (n ? '★'.repeat(n) + '☆'.repeat(5 - n) : '')
+// Sterne in 0,5er-Schritten (0,5 … 5). Text: ★★★½☆ (Halbstern als ½)
+export const roundHalf = n => Math.round(Number(n) * 2) / 2
+export function starsText(n) {
+  const v = roundHalf(n)
+  if (!v) return ''
+  const full = Math.floor(v), half = v - full >= 0.5
+  return '★'.repeat(full) + (half ? '½' : '') + '☆'.repeat(Math.max(0, 5 - full - (half ? 1 : 0)))
+}
+// Einzelbewertung: 4 oder 3,5
+export const fmtStar = n => (Number.isInteger(Number(n)) ? String(Number(n)) : Number(n).toFixed(1).replace('.', ','))
+// Auswahl für „ab … Sternen“
+export const MIN_STAR_OPTIONS = [2, 2.5, 3, 3.5, 4, 4.5, 5]
 
 // Durchschnitt der vergebenen Sterne (null, wenn noch keine Bewertung mit Sternen)
 export function avgStars(ratings) {
-  const v = ratings.filter(r => r.stars).map(r => r.stars)
+  const v = ratings.filter(r => r.stars).map(r => Number(r.stars))
   return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null
 }
 

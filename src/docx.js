@@ -1,4 +1,4 @@
-import { fmtDate, starsText, fmtAvg, titleOf, metaOf } from './tastingUtils'
+import { fmtDate, starsText, fmtAvg, fmtStar, titleOf, metaOf } from './tastingUtils'
 
 // Whisky-Journal als Word-Datei (.docx), komplett im Browser erzeugt (ohne Bibliothek, ZIP ohne Kompression)
 
@@ -107,7 +107,7 @@ export function makeDocx(journal, imgs, { title = 'Whisky-Journal' } = {}) {
       let rate = ''
       for (const r of ratings) {
         const label = `${r.rater}: `
-        const stars = r.stars ? starsText(r.stars) : '–'
+        const stars = r.stars ? `${starsText(r.stars)} ${fmtStar(r.stars)}` : '–'
         rate += para(run(label, { b: true, sz: 18 }) + run(stars, { color: 'B07A10', sz: 20 }) + (r.special ? run('  ✦ außergewöhnlich', { b: true, color: 'B07A10', sz: 18 }) : ''), { after: 40 })
       }
       if (ratings.filter(r => r.stars).length > 1) rate += para(run(`Ø ${fmtAvg(avg)}`, { color: '666666', sz: 18 }))

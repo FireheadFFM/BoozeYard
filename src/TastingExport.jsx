@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { supabase } from './supabase'
 import { BUCKET } from './utils'
-import { fmtDate, starsText, fmtAvg, titleOf, metaOf, buildJournal, todayIso } from './tastingUtils'
+import { fmtDate, starsText, fmtAvg, fmtStar, roundHalf, MIN_STAR_OPTIONS, titleOf, metaOf, buildJournal, todayIso } from './tastingUtils'
 import { makeDocx } from './docx'
 import { makeGif } from './gif'
 
@@ -71,7 +71,7 @@ function JournalPrint({ journal, urls }) {
                     <td className="c-name"><b>{titleOf(t) || 'Unbenannt'}</b><div>{metaOf(t)}</div></td>
                     <td className="c-rate">
                       {ratings.map(r => (
-                        <div key={r.id}><b>{r.rater}:</b> <span className="st">{r.stars ? starsText(r.stars) : '–'}</span>{r.special && <b className="sp"> ✦ außergewöhnlich</b>}</div>
+                        <div key={r.id}><b>{r.rater}:</b> <span className="st">{r.stars ? <>{starsText(r.stars)} {fmtStar(r.stars)}</> : '–'}</span>{r.special && <b className="sp"> ✦ außergewöhnlich</b>}</div>
                       ))}
                       {ratings.filter(r => r.stars).length > 1 && <div className="avg">Ø {fmtAvg(avg)}</div>}
                     </td>
@@ -192,7 +192,7 @@ export default function TastingExport({ events, tastings, ratings, selectedEvent
       gifChosen.forEach((r, i) => {
         if (!blobs[i]) return
         const a = r.avg
-        items.push({ blob: blobs[i], title: titleOf(r.t) || 'Unbenannt', sub: a !== null ? `${starsText(Math.round(a))} ${fmtAvg(a)}` : '' })
+        items.push({ blob: blobs[i], title: titleOf(r.t) || 'Unbenannt', sub: a !== null ? `${starsText(roundHalf(a))} ${fmtAvg(a)}` : '' })
       })
       if (items.length === 0) throw new Error('keine Bilder geladen')
       const blob = await makeGif(items, { size, delayMs: delay, captions, onProgress: (d, t) => setProg({ step: 'GIF erzeugen', done: d, total: t }) })
@@ -239,7 +239,7 @@ export default function TastingExport({ events, tastings, ratings, selectedEvent
       <div className="filter-row">
         <select value={minStars} aria-label="Mindeststerne" onChange={e => setMinStars(Number(e.target.value))}>
           <option value={0}>Alle Sterne</option>
-          {[2, 3, 4, 5].map(n => <option key={n} value={n}>ab {n} Sternen</option>)}
+          {MIN_STAR_OPTIONS.map(n => <option key={n} value={n}>ab {fmtStar(n)} Sternen</option>)}
         </select>
         <select value={byStars ? 'stars' : 'order'} aria-label="Reihenfolge" onChange={e => setByStars(e.target.value === 'stars')}>
           <option value="order">Reihenfolge wie probiert</option>

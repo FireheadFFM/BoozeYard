@@ -430,8 +430,18 @@ a.shown-item { text-decoration: none; }
 .t-rater { font-weight: 600; flex: 1; }
 .t-x { background: transparent; border: 1px solid #4a3018; color: #c8a96a; border-radius: 8px; width: 38px; height: 38px; font-size: 20px; cursor: pointer; }
 .t-stars { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
-.t-star { background: transparent; border: none; color: #6a5030; font-size: 32px; line-height: 1; width: 44px; height: 44px; cursor: pointer; padding: 0; }
-.t-star.on { color: #f0c96a; }
+.t-slider { flex: 1 1 100%; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.t-sl-top { display: flex; align-items: center; gap: 10px; }
+.t-sl-stars { display: inline-flex; font-size: 30px; line-height: 1; }
+.t-sl-stars .hs { position: relative; display: inline-block; color: #3a2810; }
+.t-sl-stars .hs-fill { position: absolute; left: 0; top: 0; overflow: hidden; color: #f0c96a; white-space: nowrap; }
+.t-sl-stars.none .hs { color: #2e1f0e; }
+.t-sl-val { color: #f0c96a; font-size: 16px; min-width: 2.5em; }
+.t-range { -webkit-appearance: none; appearance: none; width: 100%; height: 44px; background: transparent; margin: 0; touch-action: pan-y; cursor: pointer; }
+.t-range::-webkit-slider-runnable-track { height: 8px; border-radius: 4px; background: linear-gradient(90deg, #5a3c14, #c8891a); }
+.t-range::-moz-range-track { height: 8px; border-radius: 4px; background: linear-gradient(90deg, #5a3c14, #c8891a); }
+.t-range::-webkit-slider-thumb { -webkit-appearance: none; width: 30px; height: 30px; margin-top: -11px; border-radius: 50%; background: #f0c96a; border: 3px solid #0f0a06; box-shadow: 0 0 0 1px #c8891a; }
+.t-range::-moz-range-thumb { width: 24px; height: 24px; border-radius: 50%; background: #f0c96a; border: 3px solid #0f0a06; box-shadow: 0 0 0 1px #c8891a; }
 .t-special { margin-left: auto; padding: 9px 12px; border-radius: 18px; border: 1px dashed #4a3018; background: transparent; color: #c8a96a; font-family: inherit; font-size: 12px; cursor: pointer; }
 .t-special.on { border-style: solid; border-color: #c8891a; background: #3a2810; color: #f0c96a; }
 .t-note { display: flex; gap: 8px; align-items: flex-start; }

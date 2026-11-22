@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from './supabase'
 import { BUCKET, fetchAll, lsGet, lsSet } from './utils'
 import { runAnalyze, resizeCached } from './shared'
-import { todayIso, fmtDate, starsText, avgStars, fmtAvg, titleOf, metaOf, sortRatings, hasSpecial } from './tastingUtils'
+import { todayIso, fmtDate, starsText, avgStars, fmtAvg, fmtStar, roundHalf, MIN_STAR_OPTIONS, titleOf, metaOf, sortRatings, hasSpecial } from './tastingUtils'
 import TastingExport from './TastingExport'
 
 // Tasting: Whiskys auf Messen und Verkostungen erfassen (Etikett-Foto), mit Sternen, "außergewöhnlich" und Kurzbeschreibung bewerten
@@ -54,6 +54,47 @@ function Dictate({ onText }) {
 }
 
 /* ---------- Hauptansicht ---------- */
+
+// Halbe Sterne per Schieberegler (0 = nicht bewertet, 0,5 … 5). Speichert kurz nach dem Loslassen.
+function StarSlider({ value, onCommit }) {
+  const cur = value ? Number(value) : 0
+  const [draft, setDraft] = useState(null)
+  const timer = useRef(null)
+  const saved = useRef(cur)
+  saved.current = cur
+  const latest = useRef(onCommit)
+  latest.current = onCommit
+  useEffect(() => () => clearTimeout(timer.current), [])
+  const v = draft === null ? cur : draft
+  function flush(n) {
+    clearTimeout(timer.current)
+    setDraft(null)
+    if (n !== saved.current) latest.current(n)
+  }
+  function change(e) {
+    const n = Number(e.target.value)
+    if (n !== v) { try { navigator.vibrate?.(8) } catch { /* egal */ } }
+    setDraft(n)
+    clearTimeout(timer.current)
+    timer.current = setTimeout(() => flush(n), 500)
+  }
+  const end = e => flush(Number(e.currentTarget.value))
+  return (
+    <div className="t-slider">
+      <div className="t-sl-top">
+        <span className={'t-sl-stars' + (v ? '' : ' none')} aria-hidden="true">
+          {[1, 2, 3, 4, 5].map(i => (
+            <span key={i} className="hs">★<span className="hs-fill" style={{ width: Math.max(0, Math.min(1, v - (i - 1))) * 100 + '%' }}>★</span></span>
+          ))}
+        </span>
+        <b className="t-sl-val">{v ? fmtStar(v) : 'nicht bewertet'}</b>
+      </div>
+      <input type="range" className="t-range" min={0} max={5} step={0.5} value={v} aria-label="Sterne"
+        aria-valuetext={v ? `${fmtStar(v)} Sterne` : 'nicht bewertet'}
+        onChange={change} onPointerUp={end} onTouchEnd={end} onKeyUp={end} onBlur={end} />
+    </div>
+  )
+}
 
 export default function Tasting({ userId, cats, lookups, wishlist = [], reload }) {
   const [events, setEvents] = useState([])
@@ -336,7 +377,7 @@ export default function Tasting({ userId, cats, lookups, wishlist = [], reload }
     await patchRating(id, { [k]: v })
   }
   function setStars(r, n) {
-    patchRating(r.id, { stars: r.stars === n ? null : n })
+    patchRating(r.id, { stars: n || null })
   }
   function appendNote(r, text) {
     const cur = ratingsRef.current.find(x => x.id === r.id)?.note || ''
@@ -452,7 +493,7 @@ export default function Tasting({ userId, cats, lookups, wishlist = [], reload }
             <p>{metaOf(t) || (busy === 'ai' || busy === 'upload' ? 'Foto wird ausgewertet…' : '')}</p>
             {!eventSel && evById[t.event_id] && <p className="muted t-evline">{evById[t.event_id].name} · {fmtDate(evById[t.event_id].event_date)}</p>}
             <div className="t-sum">
-              {avg !== null ? <span className="t-stars-sum">{starsText(Math.round(avg))} <b>{fmtAvg(avg)}</b></span> : <span className="muted">noch nicht bewertet</span>}
+              {avg !== null ? <span className="t-stars-sum">{starsText(roundHalf(avg))} <b>{fmtAvg(avg)}</b></span> : <span className="muted">noch nicht bewertet</span>}
               {rs.length > 1 && <span className="muted"> · {rated}/{rs.length} Bewertungen</span>}
               {special && <span className="tag warn t-special-tag">✦ außergewöhnlich</span>}
             </div>
@@ -484,9 +525,7 @@ export default function Tasting({ userId, cats, lookups, wishlist = [], reload }
                   {confirm === 'r:' + r.id && <button type="button" className="mini danger-mini" onClick={() => deleteRating(r.id)}>Wirklich entfernen</button>}
                 </div>
                 <div className="t-stars">
-                  {[1, 2, 3, 4, 5].map(n => (
-                    <button key={n} type="button" className={'t-star' + (r.stars >= n ? ' on' : '')} aria-label={`${n} Sterne`} onClick={() => setStars(r, n)}>{r.stars >= n ? '★' : '☆'}</button>
-                  ))}
+                  <StarSlider value={r.stars} onCommit={n => setStars(r, n)} />
                   <button type="button" className={'t-special' + (r.special ? ' on' : '')} aria-pressed={!!r.special} onClick={() => patchRating(r.id, { special: !r.special })}>✦ Außergewöhnlich</button>
                 </div>
                 <div className="t-note">
@@ -577,7 +616,7 @@ export default function Tasting({ userId, cats, lookups, wishlist = [], reload }
           </select>
           <select value={minStars} aria-label="Mindeststerne" onChange={e => setMinStars(Number(e.target.value))}>
             <option value={0}>Alle Sterne</option>
-            {[2, 3, 4, 5].map(n => <option key={n} value={n}>ab {n} Sternen</option>)}
+            {MIN_STAR_OPTIONS.map(n => <option key={n} value={n}>ab {fmtStar(n)} Sternen</option>)}
           </select>
         </div>
         <label className="qr-row">
