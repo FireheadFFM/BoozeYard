@@ -1,6 +1,7 @@
 import { supabase } from './supabase'
 import { resizeImage, blobToBase64, productKey } from './utils'
 import { parsePlaceCode } from './qr'
+import { sameWords } from './tastingUtils'
 
 // Gemeinsame Hilfsfunktionen für Formular, Scanner und Foto-Schnellerfassung
 
@@ -89,6 +90,22 @@ export async function runAnalyze(files, cats, lookups) {
   if (data?.error) throw new Error(data.error)
   if (!data?.result) throw new Error('Keine Antwort erhalten')
   return data.result
+}
+
+/* ---------- Diktat: Satzzeichen per KI ergänzen ---------- */
+
+// Gibt den geglätteten Text zurück oder null (zu kurz, Fehler, Zeitüberschreitung oder Wörter verändert)
+export async function polishText(text) {
+  const t = String(text || '').trim()
+  if (t.split(/\s+/).length < 3 || t.length > 3000) return null
+  let timer
+  const timeout = new Promise((_, rej) => { timer = setTimeout(() => rej(new Error('Zeitüberschreitung')), 10000) })
+  try {
+    const { data, error } = await Promise.race([supabase.functions.invoke('polish-text', { body: { text: t } }), timeout])
+    if (error || data?.error) return null
+    const out = String(data?.text || '').trim()
+    return out && sameWords(t, out) ? out : null
+  } catch { return null } finally { clearTimeout(timer) }
 }
 
 /* ---------- Auswahllisten ---------- */

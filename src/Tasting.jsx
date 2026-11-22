@@ -1,13 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from './supabase'
 import { BUCKET, fetchAll, lsGet, lsSet } from './utils'
-import { runAnalyze, resizeCached } from './shared'
-import { todayIso, fmtDate, starsText, avgStars, fmtAvg, fmtStar, roundHalf, MIN_STAR_OPTIONS, titleOf, metaOf, sortRatings, hasSpecial } from './tastingUtils'
+import { runAnalyze, resizeCached, polishText } from './shared'
+import { todayIso, fmtDate, starsText, avgStars, fmtAvg, fmtStar, roundHalf, MIN_STAR_OPTIONS, titleOf, metaOf, sortRatings, hasSpecial, quickPolish } from './tastingUtils'
 import TastingExport from './TastingExport'
 
 // Tasting: Whiskys auf Messen und Verkostungen erfassen (Etikett-Foto), mit Sternen, "außergewöhnlich" und Kurzbeschreibung bewerten
 
 const SR = typeof window !== 'undefined' ? (window.SpeechRecognition || window.webkitSpeechRecognition) : null
+
+const ALL = '__all'
 
 const SORTS = [
   ['date_desc', 'Datum: neueste zuerst'],
@@ -103,7 +105,9 @@ export default function Tasting({ userId, cats, lookups, wishlist = [], reload }
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [msg, setMsg] = useState('')
-  const [eventSel, setEventSel] = useState('')       // '' = alle Veranstaltungen
+  const [eventSel, setEventSel] = useState('')       // aufgeklappte Veranstaltung: '' = alle zu, ALL = „Alle Whiskys“
+  const [exportOpen, setExportOpen] = useState(false)
+  const [polishing, setPolishing] = useState({})      // Bewertungs-ID -> KI glättet gerade das Diktat
   const [evForm, setEvForm] = useState(null)         // { mode: 'new'|'edit', name, date, del }
   const [sortBy, setSortBy] = useState(() => (SORTS.some(s => s[0] === lsGet('tasting_sort')) ? lsGet('tasting_sort') : 'date_desc'))
   const [minStars, setMinStars] = useState(0)
@@ -122,6 +126,7 @@ export default function Tasting({ userId, cats, lookups, wishlist = [], reload }
   const filesRef = useRef({})
   const tastingsRef = useRef([])
   const ratingsRef = useRef([])
+  const realEv = eventSel && eventSel !== ALL ? eventSel : ''   // echte Veranstaltung (nicht „Alle Whiskys“)
   tastingsRef.current = tastings
   ratingsRef.current = ratings
 
@@ -150,12 +155,7 @@ export default function Tasting({ userId, cats, lookups, wishlist = [], reload }
       setEvents(ev.data)
       setTastings(tg.data)
       setRatings(rt.data)
-      setEventSel(cur => {
-        if (cur && ev.data.some(e => e.id === cur)) return cur
-        const stored = lsGet('tasting_event')
-        if (stored && ev.data.some(e => e.id === stored)) return stored
-        return ev.data[0]?.id || ''
-      })
+      setEventSel(cur => (cur === ALL || (cur && ev.data.some(e => e.id === cur)) ? cur : ''))
       if (ev.data.length === 0) setEvForm({ mode: 'new', name: '', date: todayIso() })
       loadThumbs(tg.data)
     }
@@ -176,7 +176,6 @@ export default function Tasting({ userId, cats, lookups, wishlist = [], reload }
 
   function pickEvent(id) {
     setEventSel(id)
-    if (id) lsSet('tasting_event', id)
     setEvForm(null)
     setConfirm('')
   }
@@ -192,15 +191,15 @@ export default function Tasting({ userId, cats, lookups, wishlist = [], reload }
       setEvents(l => [data, ...l])
       pickEvent(data.id)
     } else {
-      const { error: e } = await supabase.from('tasting_events').update({ name, event_date: evForm.date }).eq('id', eventSel)
+      const { error: e } = await supabase.from('tasting_events').update({ name, event_date: evForm.date }).eq('id', realEv)
       if (e) return fail(e)
-      setEvents(l => l.map(x => (x.id === eventSel ? { ...x, name, event_date: evForm.date } : x)))
+      setEvents(l => l.map(x => (x.id === realEv ? { ...x, name, event_date: evForm.date } : x)))
       setEvForm(null)
     }
   }
 
   async function deleteEvent() {
-    const id = eventSel
+    const id = realEv
     const paths = tastings.filter(t => t.event_id === id).flatMap(t => [t.image_front, t.image_back, t.image_thumb]).filter(Boolean)
     try {
       if (paths.length) await supabase.storage.from(BUCKET).remove(paths)
@@ -213,7 +212,7 @@ export default function Tasting({ userId, cats, lookups, wishlist = [], reload }
     setRatings(l => l.filter(r => tastings.find(t => t.id === r.tasting_id)?.event_id !== id))
     setEvForm(null)
     setConfirm('')
-    pickEvent(rest[0]?.id || '')
+    pickEvent('')
   }
 
   /* ----- Whisky anlegen und Foto auswerten ----- */
@@ -314,9 +313,9 @@ export default function Tasting({ userId, cats, lookups, wishlist = [], reload }
   }
 
   async function createWhisky(file) {
-    if (!eventSel) return setMsg('Fehler: Bitte zuerst eine Veranstaltung wählen.')
+    if (!realEv) return setMsg('Fehler: Bitte zuerst eine Veranstaltung aufklappen.')
     setMsg('')
-    const { data: row, error: e1 } = await supabase.from('tastings').insert({ event_id: eventSel, brand: '', name: '' }).select('*').single()
+    const { data: row, error: e1 } = await supabase.from('tastings').insert({ event_id: realEv, brand: '', name: '' }).select('*').single()
     if (e1) return fail(e1)
     const { data: rt, error: e2 } = await supabase.from('tasting_ratings').insert({ tasting_id: row.id, rater: lsGet('tasting_me') || 'Ich', is_me: true }).select('*').single()
     if (e2) fail(e2)
@@ -379,9 +378,24 @@ export default function Tasting({ userId, cats, lookups, wishlist = [], reload }
   function setStars(r, n) {
     patchRating(r.id, { stars: n || null })
   }
-  function appendNote(r, text) {
-    const cur = ratingsRef.current.find(x => x.id === r.id)?.note || ''
-    patchRating(r.id, { note: (cur ? cur.trim() + ' ' : '') + text })
+  // Diktat: sofort Grundform (Anfang groß, Punkt), kurz danach ersetzt die KI-Fassung mit Satzzeichen
+  async function dictated(r, text) {
+    const quick = quickPolish(text)
+    if (!quick) return
+    const cur = (ratingsRef.current.find(x => x.id === r.id)?.note || '').trim()
+    const sep = cur ? (/[.!?…]$/.test(cur) ? ' ' : '. ') : ''
+    patchRating(r.id, { note: cur + sep + quick })
+    setPolishing(p => ({ ...p, [r.id]: true }))
+    try {
+      const better = await polishText(text)
+      if (better && better !== quick) {
+        const now = ratingsRef.current.find(x => x.id === r.id)?.note || ''
+        const i = now.lastIndexOf(quick)
+        if (i >= 0) patchRating(r.id, { note: now.slice(0, i) + better + now.slice(i + quick.length) })
+      }
+    } finally {
+      setPolishing(p => { const n = { ...p }; delete n[r.id]; return n })
+    }
   }
 
   const knownRaters = useMemo(() => {
@@ -446,7 +460,7 @@ export default function Tasting({ userId, cats, lookups, wishlist = [], reload }
 
   const rows = useMemo(() => {
     let list = tastings
-      .filter(t => !eventSel || t.event_id === eventSel)
+      .filter(t => eventSel === ALL || (eventSel && t.event_id === eventSel))
       .map(t => { const rs = rBy[t.id] || []; return { t, rs, avg: avgStars(rs), special: hasSpecial(rs) } })
     if (minStars) list = list.filter(x => x.avg !== null && x.avg >= minStars)
     if (onlySpecial) list = list.filter(x => x.special)
@@ -471,7 +485,19 @@ export default function Tasting({ userId, cats, lookups, wishlist = [], reload }
     })
   }, [rows, sortBy, evById])
 
-  const curEvent = eventSel ? evById[eventSel] : null
+  const curEvent = realEv ? evById[realEv] : null
+  const evStats = useMemo(() => {
+    const m = {}
+    for (const t of tastings) {
+      const rs = rBy[t.id] || []
+      const a = avgStars(rs)
+      const x = (m[t.event_id] ||= { n: 0, special: 0, best: null })
+      x.n++
+      if (hasSpecial(rs)) x.special++
+      if (a !== null && (x.best === null || a > x.best)) x.best = a
+    }
+    return m
+  }, [tastings, rBy])
 
   function renderCard({ t, rs, avg, special }) {
     const open = openId === t.id
@@ -491,7 +517,7 @@ export default function Tasting({ userId, cats, lookups, wishlist = [], reload }
           <div className="card-info">
             <h3>{title}</h3>
             <p>{metaOf(t) || (busy === 'ai' || busy === 'upload' ? 'Foto wird ausgewertet…' : '')}</p>
-            {!eventSel && evById[t.event_id] && <p className="muted t-evline">{evById[t.event_id].name} · {fmtDate(evById[t.event_id].event_date)}</p>}
+            {eventSel === ALL && evById[t.event_id] && <p className="muted t-evline">{evById[t.event_id].name} · {fmtDate(evById[t.event_id].event_date)}</p>}
             <div className="t-sum">
               {avg !== null ? <span className="t-stars-sum">{starsText(roundHalf(avg))} <b>{fmtAvg(avg)}</b></span> : <span className="muted">noch nicht bewertet</span>}
               {rs.length > 1 && <span className="muted"> · {rated}/{rs.length} Bewertungen</span>}
@@ -531,8 +557,9 @@ export default function Tasting({ userId, cats, lookups, wishlist = [], reload }
                 <div className="t-note">
                   <textarea rows={2} placeholder="Kurze Beschreibung (tippen oder diktieren)" value={r.note || ''}
                     onChange={e => patchRating(r.id, { note: e.target.value }, false)} onBlur={() => saveRatingText(r.id, 'note')} />
-                  <Dictate onText={text => appendNote(r, text)} />
+                  <Dictate onText={text => dictated(r, text)} />
                 </div>
+                {polishing[r.id] && <div className="t-polish muted">Satzzeichen werden ergänzt…</div>}
               </div>
             ))}
 
@@ -568,47 +595,26 @@ export default function Tasting({ userId, cats, lookups, wishlist = [], reload }
   if (loading) return <div className="empty">Lädt…</div>
   if (error) return <div className="msg error">{error}</div>
 
-  return (
-    <div className="tasting">
-      {msg && <div className={'msg' + (msg.startsWith('Fehler') ? ' error' : '')}>{msg}</div>}
-
-      <div className="card column">
-        <div className="fld"><span>Veranstaltung</span>
-          <select value={eventSel} onChange={e => pickEvent(e.target.value)}>
-            <option value="">Alle Veranstaltungen</option>
-            {events.map(e => <option key={e.id} value={e.id}>{e.name} · {fmtDate(e.event_date)}</option>)}
-          </select>
-        </div>
-        <div className="row-btns">
-          <button type="button" className="mini" onClick={() => setEvForm(f => (f?.mode === 'new' ? null : { mode: 'new', name: '', date: todayIso() }))}>+ Neue Veranstaltung</button>
-          {curEvent && <button type="button" className="mini" onClick={() => setEvForm(f => (f?.mode === 'edit' ? null : { mode: 'edit', name: curEvent.name, date: curEvent.event_date }))}>Bearbeiten</button>}
-        </div>
-        {evForm && (
-          <div className="edit-box">
-            <label className="fld"><span>Name</span><input placeholder="z. B. Whisky Messe Frankfurt" value={evForm.name} onChange={e => setEvForm({ ...evForm, name: e.target.value })} /></label>
-            <label className="fld"><span>Datum</span><input type="date" value={evForm.date} onChange={e => setEvForm({ ...evForm, date: e.target.value })} /></label>
-            <button type="button" className="save-btn" onClick={saveEvent}>{evForm.mode === 'new' ? 'Veranstaltung anlegen' : 'Speichern'}</button>
-            {evForm.mode === 'edit' && (confirm !== 'e'
-              ? <button type="button" className="danger-btn slim" onClick={() => setConfirm('e')}>Veranstaltung löschen</button>
-              : (
-                <div className="confirm-box">
-                  <p>„{curEvent?.name}“ mit allen {tastings.filter(t => t.event_id === eventSel).length} Whiskys und Bewertungen wird endgültig gelöscht.</p>
-                  <button type="button" className="scan-btn" onClick={deleteEvent}>Endgültig löschen</button>
-                  <button type="button" className="ghost-btn" onClick={() => setConfirm('')}>Abbrechen</button>
-                </div>
-              ))}
+  const evBox = evForm && (
+    <div className="edit-box">
+      <label className="fld"><span>Name</span><input placeholder="z. B. Whisky Messe Frankfurt" value={evForm.name} onChange={e => setEvForm({ ...evForm, name: e.target.value })} /></label>
+      <label className="fld"><span>Datum</span><input type="date" value={evForm.date} onChange={e => setEvForm({ ...evForm, date: e.target.value })} /></label>
+      <button type="button" className="save-btn" onClick={saveEvent}>{evForm.mode === 'new' ? 'Veranstaltung anlegen' : 'Speichern'}</button>
+      <button type="button" className="ghost-btn" onClick={() => { setEvForm(null); setConfirm('') }}>Abbrechen</button>
+      {evForm.mode === 'edit' && (confirm !== 'e'
+        ? <button type="button" className="danger-btn slim" onClick={() => setConfirm('e')}>Veranstaltung löschen</button>
+        : (
+          <div className="confirm-box">
+            <p>„{curEvent?.name}“ mit allen {tastings.filter(t => t.event_id === realEv).length} Whiskys und Bewertungen wird endgültig gelöscht.</p>
+            <button type="button" className="scan-btn" onClick={deleteEvent}>Endgültig löschen</button>
+            <button type="button" className="ghost-btn" onClick={() => setConfirm('')}>Abbrechen</button>
           </div>
-        )}
-      </div>
+        ))}
+    </div>
+  )
 
-      <div className="t-add">
-        <button type="button" className="scan-btn t-big" disabled={!eventSel} onClick={() => photoRef.current?.click()}>Whisky fotografieren</button>
-        <button type="button" className="scan-btn secondary t-big" disabled={!eventSel} onClick={() => createWhisky(null)}>Ohne Foto eintragen</button>
-        {!eventSel && <div className="hint">Wähle oben eine Veranstaltung (statt „Alle“) oder lege eine neue an, dann kannst du Whiskys erfassen.</div>}
-        <input ref={photoRef} type="file" accept="image/*" capture="environment" hidden onChange={onPhoto} />
-        <input ref={backRef} type="file" accept="image/*" capture="environment" hidden onChange={onBack} />
-      </div>
-
+  const listBody = (
+    <>
       <div className="filters t-filters">
         <div className="filter-row">
           <select value={sortBy} aria-label="Sortierung" onChange={e => { setSortBy(e.target.value); lsSet('tasting_sort', e.target.value) }}>
@@ -625,16 +631,80 @@ export default function Tasting({ userId, cats, lookups, wishlist = [], reload }
         </label>
         <div className="count">{rows.length} {rows.length === 1 ? 'Whisky' : 'Whiskys'}</div>
       </div>
-
       {rows.length === 0 && <div className="empty">{tastings.length === 0 ? 'Noch kein Whisky erfasst. Tippe auf „Whisky fotografieren“.' : 'Keine Whiskys für diese Auswahl.'}</div>}
       {groups.map(g => (
         <div key={g.key}>
-          {g.ev && <div className="t-group">{g.ev.name} · {fmtDate(g.ev.event_date)} <span>{g.rows.length}</span></div>}
+          {g.ev && eventSel === ALL && <div className="t-group">{g.ev.name} · {fmtDate(g.ev.event_date)} <span>{g.rows.length}</span></div>}
           {g.rows.map(renderCard)}
         </div>
       ))}
+    </>
+  )
 
-      <TastingExport events={events} tastings={tastings} ratings={ratings} selectedEvent={eventSel} />
+  return (
+    <div className="tasting">
+      {msg && <div className={'msg' + (msg.startsWith('Fehler') ? ' error' : '')}>{msg}</div>}
+
+      {evForm?.mode === 'new' && evBox}
+      {!evForm && <button type="button" className="mini t-newev" onClick={() => setEvForm({ mode: 'new', name: '', date: todayIso() })}>+ Neue Veranstaltung</button>}
+
+      {events.length === 0 && !evForm && <div className="empty">Noch keine Veranstaltung. Lege oben eine an, dann kannst du Whiskys erfassen.</div>}
+
+      {events.map(e => {
+        const st = evStats[e.id] || { n: 0, special: 0, best: null }
+        const isOpen = eventSel === e.id
+        return (
+          <div key={e.id} className={'t-ev' + (isOpen ? ' open' : '')}>
+            <button type="button" className="t-ev-head" aria-expanded={isOpen} onClick={() => pickEvent(isOpen ? '' : e.id)}>
+              <span className="t-ev-main">
+                <b className="t-ev-name">{e.name}</b>
+                <span className="t-ev-meta">{fmtDate(e.event_date)} · {st.n} {st.n === 1 ? 'Whisky' : 'Whiskys'}{st.special ? ` · ✦ ${st.special}` : ''}{st.best !== null ? ` · beste Ø ${fmtAvg(st.best)}` : ''}</span>
+              </span>
+              <span className="t-ev-chev" aria-hidden="true">{isOpen ? '▾' : '▸'}</span>
+            </button>
+            {isOpen && (
+              <div className="t-ev-body">
+                {evForm?.mode === 'edit' ? evBox : (
+                  <div className="row-btns">
+                    <button type="button" className="mini" onClick={() => setEvForm({ mode: 'edit', name: curEvent.name, date: curEvent.event_date })}>Bearbeiten</button>
+                  </div>
+                )}
+                <div className="t-add">
+                  <button type="button" className="scan-btn t-big" onClick={() => photoRef.current?.click()}>Whisky fotografieren</button>
+                  <button type="button" className="scan-btn secondary t-big" onClick={() => createWhisky(null)}>Ohne Foto eintragen</button>
+                </div>
+                {listBody}
+              </div>
+            )}
+          </div>
+        )
+      })}
+
+      {tastings.length > 0 && (
+        <div className={'t-ev' + (eventSel === ALL ? ' open' : '')}>
+          <button type="button" className="t-ev-head" aria-expanded={eventSel === ALL} onClick={() => pickEvent(eventSel === ALL ? '' : ALL)}>
+            <span className="t-ev-main">
+              <b className="t-ev-name">Alle Whiskys</b>
+              <span className="t-ev-meta">{tastings.length} {tastings.length === 1 ? 'Whisky' : 'Whiskys'} aus allen Veranstaltungen</span>
+            </span>
+            <span className="t-ev-chev" aria-hidden="true">{eventSel === ALL ? '▾' : '▸'}</span>
+          </button>
+          {eventSel === ALL && <div className="t-ev-body">{listBody}</div>}
+        </div>
+      )}
+
+      <input ref={photoRef} type="file" accept="image/*" capture="environment" hidden onChange={onPhoto} />
+      <input ref={backRef} type="file" accept="image/*" capture="environment" hidden onChange={onBack} />
+
+      <div className={'t-ev' + (exportOpen ? ' open' : '')}>
+        <button type="button" className="t-ev-head" aria-expanded={exportOpen} onClick={() => setExportOpen(o => !o)}>
+          <span className="t-ev-main"><b className="t-ev-name">Journal &amp; GIF</b><span className="t-ev-meta">Word, PDF und animiertes GIF aus den Etiketten</span></span>
+          <span className="t-ev-chev" aria-hidden="true">{exportOpen ? '▾' : '▸'}</span>
+        </button>
+      </div>
+      <div hidden={!exportOpen}>
+        <TastingExport events={events} tastings={tastings} ratings={ratings} selectedEvent={realEv} />
+      </div>
     </div>
   )
 }

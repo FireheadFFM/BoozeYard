@@ -512,3 +512,16 @@ a.shown-item { text-decoration: none; }
 @media (min-width: 560px) {
   .card-acts:not(.two) { grid-template-columns: repeat(3, 40px); }
 }
+
+/* U28: Tasting – Veranstaltungs-Kacheln */
+.t-newev { align-self: flex-start; margin-bottom: 10px; }
+.t-ev { border: 1px solid #3a2810; border-radius: 12px; background: #140b04; margin-bottom: 10px; overflow: hidden; }
+.t-ev.open { border-color: #c8891a; }
+.t-ev-head { display: flex; align-items: center; gap: 10px; width: 100%; padding: 14px; background: transparent; border: none; color: #f0e6d3; font-family: inherit; text-align: left; cursor: pointer; }
+.t-ev-main { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 0; }
+.t-ev-name { font-size: 16px; color: #f0c96a; font-weight: 600; overflow-wrap: anywhere; }
+.t-ev-meta { font-size: 12px; color: #c8a96a; line-height: 1.4; }
+.t-ev-chev { color: #f0c96a; font-size: 20px; flex: none; }
+.t-ev-body { padding: 0 12px 12px; display: flex; flex-direction: column; gap: 10px; }
+.t-ev-body .t-add { margin-bottom: 4px; }
+.t-polish { font-size: 12px; margin-top: -4px; }

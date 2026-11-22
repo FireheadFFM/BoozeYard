@@ -68,3 +68,17 @@ export function buildJournal({ events, tastings, ratings, eventIds, minStars = 0
   }
   return out
 }
+
+// Diktat: sofort nutzbare Grundform (Anfang groß, Punkt am Ende)
+export function quickPolish(text) {
+  let t = String(text || '').replace(/\s+/g, ' ').trim()
+  if (!t) return ''
+  t = t.charAt(0).toLocaleUpperCase('de-DE') + t.slice(1)
+  if (!/[.!?…]$/.test(t)) t += '.'
+  return t
+}
+// Gleiche Wörter in gleicher Reihenfolge (Satzzeichen und Groß-/Kleinschreibung egal)
+export function sameWords(a, b) {
+  const norm = x => String(x || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim()
+  return norm(a) === norm(b)
+}
