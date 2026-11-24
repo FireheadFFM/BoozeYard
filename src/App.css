@@ -390,7 +390,9 @@ a.shown-item { text-decoration: none; }
 .ql-code { width: 76mm; height: 76mm; display: block; }
 .ql-name { font-weight: 700; line-height: 1.1; margin-top: 3mm; overflow-wrap: anywhere; max-width: 89mm; }
 .ql-path { font-size: 13pt; color: #333; margin-top: 3mm; max-width: 89mm; overflow-wrap: anywhere; }
-.ql-hint { position: absolute; bottom: 9mm; left: 0; right: 0; font-size: 8pt; color: #777; }
+.ql-foot { position: absolute; bottom: 7mm; left: 0; right: 0; display: flex; flex-direction: column; align-items: center; gap: 1.5mm; }
+.ql-hint { font-size: 8pt; color: #777; }
+.ql-nr { font-size: 24pt; font-weight: 700; line-height: 1; padding: 1.2mm 5mm; border: 0.6mm solid #000; border-radius: 2mm; color: #000; }
 
 .qr-print-root { display: none; }
 @page { size: A4 portrait; margin: 0; }
@@ -525,3 +527,9 @@ a.shown-item { text-decoration: none; }
 .t-ev-body { padding: 0 12px 12px; display: flex; flex-direction: column; gap: 10px; }
 .t-ev-body .t-add { margin-bottom: 4px; }
 .t-polish { font-size: 12px; margin-top: -4px; }
+
+/* U29: lesbare Ortsnummer */
+.loc-nr { display: inline-block; margin-right: 6px; padding: 1px 6px; border-radius: 8px; background: #3a2810; color: #f0c96a; font-size: 11px; font-weight: 700; }
+.pb-nr { display: inline-block; margin-left: 8px; padding: 1px 8px; border-radius: 8px; background: #3a2810; color: #f0c96a; font-size: 12px; font-weight: 700; }
+.code-hit { width: 100%; text-align: left; padding: 11px 12px; border-radius: 10px; border: 1px solid #c8891a; background: #2a1a08; color: #f0e6d3; font-family: inherit; font-size: 13px; cursor: pointer; line-height: 1.4; }
+.code-hit b { color: #f0c96a; }

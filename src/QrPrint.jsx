@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { qrPath, placeLink } from './qr'
+import { qrPath, placeLink, fmtLocCode } from './qr'
 
 // QR-Etiketten für Räume und Orte: Auswahl, Vorschau, Druck auf A4 (4 Etiketten A6 = 105 × 148 mm pro Bogen)
 
@@ -22,7 +22,10 @@ function QrLabel({ item, frame }) {
       </svg>
       <div className="ql-name" style={{ fontSize: `${nameSize(item.name)}pt` }}>{item.name}</div>
       <div className="ql-path">{item.path}</div>
-      <div className="ql-hint">Scannen: zeigt den Inhalt</div>
+      <div className="ql-foot">
+        {item.code != null && <div className="ql-nr">{fmtLocCode(item.code)}</div>}
+        <div className="ql-hint">Scannen: zeigt den Inhalt</div>
+      </div>
     </div>
   )
 }
@@ -52,7 +55,7 @@ export default function QrPrint({ rooms, locations }) {
     const list = []
     for (const { room, locs } of groups) {
       list.push({ key: 'r:' + room.id, name: room.name, path: 'Raum', link: placeLink('room', room.id) })
-      for (const l of locs) list.push({ key: 'l:' + l.id, name: l.name, path: `${room.name} → ${l.name}`, link: placeLink('location', l.id) })
+      for (const l of locs) list.push({ key: 'l:' + l.id, name: l.name, code: l.code ?? null, path: `${room.name} → ${l.name}`, link: placeLink('location', l.id) })
     }
     return list
   }, [groups])
@@ -81,7 +84,7 @@ export default function QrPrint({ rooms, locations }) {
     <>
       <div className="card column qr-panel">
         <p className="hint">
-          Wähle die Orte, für die du Etiketten brauchst. Auf jedem Etikett steht ein QR-Code mit dem Namen. Scannst du ihn mit der Handykamera oder in der App, siehst du sofort, was dort liegt.
+          Wähle die Orte, für die du Etiketten brauchst. Auf jedem Etikett steht ein QR-Code mit dem Namen und bei Orten die Nummer (Nr.) zum Ablesen. Scannst du ihn mit der Handykamera oder in der App, siehst du sofort, was dort liegt.
           Gedruckt wird auf A4 mit vier Etiketten à 105 × 148 mm (A6).
         </p>
         <div className="qr-quick">
@@ -98,7 +101,7 @@ export default function QrPrint({ rooms, locations }) {
             {locs.map(l => (
               <label key={l.id} className="qr-row">
                 <input type="checkbox" checked={!!sel['l:' + l.id]} onChange={() => toggle('l:' + l.id)} />
-                <span>{l.name}</span>
+                <span>{l.name}{l.code != null && <em> {fmtLocCode(l.code)}</em>}</span>
               </label>
             ))}
             {locs.length === 0 && <div className="hint qr-none">Keine Unterorte</div>}

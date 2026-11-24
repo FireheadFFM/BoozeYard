@@ -5,7 +5,7 @@ import {
   digitsOnly, codeVariants, codeWarning, lookupBarcode,
   productKey, stockGroups, pathsInUse,
 } from './utils'
-import { parsePlaceCode } from './qr'
+import { parsePlaceCode, parseLocCode, fmtLocCode } from './qr'
 import { createDetector, pickCode, decodeFromFile, runAnalyze, ensureLookup, aiToPrefill, ensureRoom, ensureLocation, clearReorderFor, resizeCached, warmImage } from './shared'
 import Schnell from './Schnell'
 import Tasting from './Tasting'
@@ -302,6 +302,13 @@ function Main({ userId, onLogout }) {
   async function handleCode(raw) {
     const place = parsePlaceCode(raw)
     if (place) { openPlace(place); return }
+    const nr = parseLocCode(raw)
+    if (nr !== null) {
+      const l = locations.find(x => x.code === nr)
+      if (l) openPlace({ kind: 'location', id: l.id })
+      else setNotice(`Es gibt keinen Ort mit der Nummer ${nr}.`)
+      return
+    }
     const data = await resolveCode(raw, bottles, cats)
     if (!data) return
     setDupMsg('')
@@ -855,6 +862,8 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, lastIn = {}, plac
     reload()
   }
 
+  const codeNum = parseLocCode(q)
+  const codeLoc = codeNum !== null ? locations.find(l => l.code === codeNum) : null
   const placeName = [roomById[roomId]?.name, locId ? locById[locId]?.name : null].filter(Boolean).join(' › ')
   function clearPlace() { setPlaceMode(false); setRoomId(''); setLocId('') }
 
@@ -865,6 +874,7 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, lastIn = {}, plac
           <div>
             <span>Inhalt von</span>
             <b>{placeName}</b>
+            {locId && locById[locId]?.code != null && <span className="pb-nr">{fmtLocCode(locById[locId].code)}</span>}
             <small>Leere Flaschen sind ausgeblendet.</small>
           </div>
           <button type="button" onClick={clearPlace}>Alle anzeigen</button>
@@ -872,6 +882,11 @@ function BottleList({ bottles, cats, rooms, locations, thumbs, lastIn = {}, plac
       )}
       <div className="filters">
         <input className="search" type="search" placeholder="Suchen: Marke, Name, Herkunft, Notiz…" value={q} onChange={e => setQ(e.target.value)} />
+        {codeLoc && (
+          <button type="button" className="code-hit" onClick={() => { setQ(''); setCatId(''); setStatus(''); setRoomId(codeLoc.room_id); setLocId(codeLoc.id); setPlaceMode(true) }}>
+            <b>{fmtLocCode(codeLoc.code)}</b> · {roomById[codeLoc.room_id]?.name} › {codeLoc.name} – Inhalt anzeigen
+          </button>
+        )}
         <div className="filter-row">
           <select value={catId} onChange={e => setCatId(e.target.value)}>
             <option value="">Alle Kategorien</option>
@@ -1196,7 +1211,7 @@ function Scanner({ onCode, onLabel, onManual, compact = false, autoStart = false
 
   async function handle(code) {
     setBusy(true)
-    setInfo(parsePlaceCode(code) ? 'Orts-Code erkannt…' : `Code ${code} erkannt – suche Produktdaten…`)
+    setInfo(parsePlaceCode(code) || parseLocCode(code) !== null ? 'Orts-Code erkannt…' : `Code ${code} erkannt – suche Produktdaten…`)
     await onCode(code)
     setInfo('')
     setBusy(false)
@@ -1389,7 +1404,7 @@ function Scanner({ onCode, onLabel, onManual, compact = false, autoStart = false
 
   const manualBox = (
     <div className="inline-add manual">
-      <input inputMode="numeric" placeholder="Code manuell eingeben (8, 12 oder 13 Ziffern)" value={manual} onChange={e => setManual(e.target.value)} />
+      <input inputMode="numeric" placeholder="Code manuell eingeben (Barcode oder Ortsnummer, z. B. 17)" value={manual} onChange={e => setManual(e.target.value)} />
       <button disabled={busy} onClick={() => manual.trim() && handle(manual.trim())}>Suchen</button>
     </div>
   )

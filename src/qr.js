@@ -45,3 +45,10 @@ export function qrPath(text) {
   }
   return { n, d }
 }
+
+// Lesbare Ortsnummer: "Nr. 17", "nr 17", "#17" oder nur "17" (1–5 Ziffern, also nie ein Barcode) -> 17, sonst null
+export function parseLocCode(text) {
+  const m = String(text ?? '').trim().match(/^(?:#|nr\.?\s*)?(\d{1,5})$/i)
+  return m ? parseInt(m[1], 10) : null
+}
+export const fmtLocCode = c => (c === null || c === undefined ? '' : `Nr. ${c}`)

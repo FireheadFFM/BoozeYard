@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import { supabase } from './supabase'
+import { fmtLocCode } from './qr'
 
 // Nächster freier Name im Zielraum: "Kiste 2" -> "Kiste 7", wenn Kiste 2..6 schon belegt sind
 function freeName(name, taken) {
@@ -205,7 +206,7 @@ export default function Rooms({ bottles, rooms, locations, reload }) {
                 <button key={l.id} type="button"
                   className={'chip chip-btn' + (sel[l.id] ? ' picked' : '') + (locEdit?.id === l.id ? ' open' : '')}
                   onClick={() => (batch ? setSel(s => ({ ...s, [l.id]: !s[l.id] })) : openLoc(l))}>
-                  {batch && <span className="box">{sel[l.id] ? '✓' : ''}</span>}{l.name} · {count(b => b.location_id === l.id)}
+                  {batch && <span className="box">{sel[l.id] ? '✓' : ''}</span>}{l.code != null && <span className="loc-nr">#{l.code}</span>}{l.name} · {count(b => b.location_id === l.id)}
                 </button>
               ))}
             </div>
@@ -217,6 +218,7 @@ export default function Rooms({ bottles, rooms, locations, reload }) {
               const moving = locEdit.roomId !== l.room_id
               return (
                 <div className="edit-box">
+                  {l.code != null && <p className="hint">Nummer <b>{fmtLocCode(l.code)}</b> – bleibt immer gleich, auch beim Umbenennen und Umziehen.</p>}
                   <div className="fld"><span>Name</span>
                     <input value={locEdit.name} onChange={e => setLocEdit({ ...locEdit, name: e.target.value })} />
                   </div>
